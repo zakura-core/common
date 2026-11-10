@@ -259,7 +259,9 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         } = other;
         if let Some((terms, scalars)) = known {
             match &mut self.known {
-                Some((_, ours)) => {
+                Some((our_terms, ours)) => {
+                    // The scalars are indexed by the points of one `KnownTerms`.
+                    debug_assert!(std::sync::Arc::ptr_eq(our_terms, &terms));
                     for (our, scalar) in ours.iter_mut().zip(scalars) {
                         *our += scalar;
                     }
@@ -297,7 +299,10 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
     pub(crate) fn extract_known(&mut self, known: &std::sync::Arc<KnownTerms<C>>) {
         debug_assert!(self.other.is_empty());
         let mut scalars = match self.known.take() {
-            Some((_, scalars)) => scalars,
+            Some((terms, scalars)) => {
+                debug_assert!(std::sync::Arc::ptr_eq(&terms, known));
+                scalars
+            }
             None => vec![C::Scalar::ZERO; known.points.len()],
         };
         self.batched_other
@@ -306,6 +311,9 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
                     if known.points[index].1 == *y {
                         scalars[index] += scalar;
                     } else {
+                        // Valid curve points with equal x-coordinates have
+                        // equal or opposite y-coordinates.
+                        debug_assert!(known.points[index].1 == -*y);
                         scalars[index] -= scalar;
                     }
                     false
@@ -671,6 +679,90 @@ mod tests {
             .chain([Fq::from(0), Fq::from(1)])
             .collect::<Vec<_>>();
         assert_cached_key_order(&vesta_xs);
+    }
+
+    /// Terms at repeated and negated points, known or not, survive
+    /// `extract_known`, `add_msm`, `add_msm_batch` and `scale` uncoalesced
+    /// and still sum exactly, both below the small-batch sort threshold and
+    /// above it (where the unsorted terms reach the GLV MSM as they are).
+    #[test]
+    fn known_terms_with_repeated_and_negated_points_sum_exactly() {
+        use super::{KnownTerms, SORTED_KNOWN_BATCH_TERMS};
+        use pasta_curves::Ep;
+        use rand::{RngExt, SeedableRng};
+        use std::sync::Arc;
+
+        let params = Params::<EpAffine>::new(4);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let random = |rng: &mut rand::rngs::StdRng| Ep::random(rng).to_affine();
+        let (k1, k2) = (random(&mut rng), random(&mut rng));
+        // The key itself repeats and negates a point.
+        let known = Arc::new(KnownTerms::new([k1, k2, k1, -k2]));
+        let distinct: Vec<EpAffine> = (0..8).map(|_| random(&mut rng)).collect();
+        let pool: Vec<EpAffine> = [k1, -k1, k2, -k2]
+            .into_iter()
+            .chain(distinct.iter().copied())
+            .chain(distinct.iter().map(|p| -*p))
+            .collect();
+
+        for terms in [40, SORTED_KNOWN_BATCH_TERMS + 64] {
+            let mut expected = Ep::identity();
+            let proof_msm = |rng: &mut rand::rngs::StdRng, expected: &mut Ep| {
+                let mut msm = MSM::new(&params);
+                for _ in 0..terms / 2 {
+                    let point = pool[rng.random_range(0..pool.len())];
+                    let scalar = Fq::random(&mut *rng);
+                    msm.append_term(scalar, point);
+                    *expected += point * scalar;
+                }
+                msm.extract_known(&known);
+                msm
+            };
+            let mut batch = proof_msm(&mut rng, &mut expected);
+            let other = proof_msm(&mut rng, &mut expected);
+            batch.add_msm_batch(other);
+
+            // `add_msm` and `scale` on a known-term MSM.
+            let mut scaled = proof_msm(&mut rng, &mut Ep::identity());
+            let factor = Fq::random(&mut rng);
+            let mut scaled_expected = Ep::identity();
+            for (scalar, base) in scaled
+                .clone()
+                .multiexp_terms()
+                .0
+                .iter()
+                .zip(scaled.clone().multiexp_terms().1)
+            {
+                scaled_expected += base * (*scalar * factor);
+            }
+            scaled.scale(factor);
+            let mut combined = MSM::new(&params);
+            combined.add_msm(&scaled);
+            assert_eq!(combined.multiexp(), scaled_expected, "terms={terms}");
+
+            assert_eq!(batch.clone().multiexp(), expected, "terms={terms}");
+            // Extracting again after more terms arrive keeps the sum.
+            let extra = random(&mut rng);
+            batch.append_term(Fq::ONE, k1);
+            batch.append_term(Fq::ONE, extra);
+            batch.extract_known(&known);
+            assert_eq!(
+                batch.clone().multiexp(),
+                expected + k1 + extra,
+                "terms={terms}"
+            );
+
+            // The batch check itself: cancelling the sum gives the identity,
+            // and a perturbed scalar does not.
+            let target = (expected + k1 + extra).to_affine();
+            let mut cancelled = batch.clone();
+            cancelled.append_term(-Fq::ONE, target);
+            assert!(cancelled.eval(), "terms={terms}");
+            let mut perturbed = batch;
+            perturbed.append_term(-Fq::ONE, target);
+            perturbed.append_term(Fq::ONE, k2);
+            assert!(!perturbed.eval(), "terms={terms}");
+        }
     }
 
     fn cancelling_full_width_msm(params: &Params<EpAffine>) -> MSM<'_, EpAffine> {

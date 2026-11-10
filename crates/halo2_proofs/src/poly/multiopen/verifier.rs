@@ -563,4 +563,74 @@ mod verifier_sets_tests {
             }
         }
     }
+
+    /// Shapes beyond the inline representation (more than `INLINE_EVALS`
+    /// evaluations of one commitment, or more than `usize::BITS` points)
+    /// take the generic construction, and proofs over them still verify.
+    #[test]
+    fn verifier_sets_fall_back_beyond_inline_shapes() {
+        use super::super::{ProverQuery, create_proof};
+        use super::{INLINE_EVALS, verify_proof};
+        use crate::arithmetic::eval_polynomial;
+        use crate::poly::{
+            EvaluationDomain,
+            commitment::{Blind, Params},
+        };
+        use crate::transcript::{Blake2bRead, Blake2bWrite, Challenge255};
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(2);
+        let commitment = crate::pasta::Eq::random(&mut rng).to_affine();
+        let many_points = (0..=usize::BITS as u64)
+            .map(|i| {
+                VerifierQuery::<EqAffine>::new_commitment(&commitment, Fp::from(i + 1), Fp::ONE)
+            })
+            .collect::<Vec<_>>();
+        assert!(construct_verifier_sets(many_points).is_err());
+
+        const K: u32 = 4;
+        let params: Params<EqAffine> = Params::new(K);
+        let domain = EvaluationDomain::new(1, K);
+        let mut poly = domain.empty_coeff();
+        for (i, coeff) in poly.iter_mut().enumerate() {
+            *coeff = Fp::from(3 + i as u64);
+        }
+        let blind = Blind(Fp::random(&mut rng));
+        let commitment = params.commit(&poly, blind).to_affine();
+        let points: Vec<Fp> = (0..=INLINE_EVALS).map(|_| Fp::random(&mut rng)).collect();
+        let evals: Vec<Fp> = points.iter().map(|x| eval_polynomial(&poly, *x)).collect();
+        let queries = |evals: &[Fp]| {
+            points
+                .iter()
+                .zip(evals)
+                .map(|(x, v)| VerifierQuery::new_commitment(&commitment, *x, *v))
+                .collect::<Vec<_>>()
+        };
+        assert!(construct_verifier_sets(queries(&evals)).is_err());
+
+        let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        create_proof(
+            &params,
+            &mut rng,
+            &mut transcript,
+            points.iter().map(|x| ProverQuery {
+                point: *x,
+                poly: &poly,
+                blind,
+            }),
+        )
+        .unwrap();
+        let proof = transcript.finalize();
+
+        let verify = |evals: &[Fp]| {
+            let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
+            verify_proof(&params, &mut transcript, queries(evals), params.empty_msm())
+                .unwrap()
+                .use_challenges()
+                .eval()
+        };
+        assert!(verify(&evals));
+        let mut wrong = evals.clone();
+        wrong[INLINE_EVALS] += Fp::ONE;
+        assert!(!verify(&wrong));
+    }
 }
