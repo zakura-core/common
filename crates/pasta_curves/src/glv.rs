@@ -1958,6 +1958,11 @@ fn batch_invert_and_add<F: Field>(
 #[cfg(feature = "multicore")]
 const MIN_REMAINDER_SLICE_BASES: usize = if cfg!(test) { 16 } else { 2048 };
 
+/// [`multiexp_parallel`] recodes digit rows up front only when there are at
+/// least this many windows per worker.
+#[cfg(feature = "multicore")]
+const MIN_WINDOWS_PER_WORKER_FOR_ROWS: usize = 1;
+
 /// The widest window whose signed digits [`booth_digit_rows`] stores.
 const MAX_DIGIT_ROW_BITS: usize = 15;
 
@@ -3021,7 +3026,13 @@ fn multiexp_parallel<C: GlvParams>(
     // claim windows one at a time instead of taking a fixed stride: with
     // cores of unequal speed (Apple's performance and efficiency cores), a
     // fixed stride gives slow cores as many windows as fast ones.
-    let rows = (window_bits <= MAX_DIGIT_ROW_BITS)
+    let workers = maybe_rayon::current_num_threads().max(1);
+    // Recoding every window's digits up front is a separate parallel pass.
+    // With more workers than windows, each window's own recoding is cheaper
+    // than that extra pass (Ice Lake, 16 workers: rows cost 2-5% of the MSM;
+    // Zen 4 at 4-8 workers and Ice Lake at 4 gain 1-5% from the rows).
+    let rows = (window_bits <= MAX_DIGIT_ROW_BITS
+        && window_count >= MIN_WINDOWS_PER_WORKER_FOR_ROWS * workers)
         .then(|| booth_digit_rows(components, bases, window_bits, window_count));
     let width = components.len() * 2;
     // Whole windows go first. When the windows left over after the last
@@ -3030,7 +3041,6 @@ fn multiexp_parallel<C: GlvParams>(
     // instead of leaving workers idle; a window's bucket sum is linear in its
     // terms, so the slices' sums add. Small slices cost more in bucket sums
     // than the idle workers they save.
-    let workers = maybe_rayon::current_num_threads().max(1);
     let n = components.len();
     let remainder = if window_count > workers && n / workers >= MIN_REMAINDER_SLICE_BASES {
         window_count % workers
