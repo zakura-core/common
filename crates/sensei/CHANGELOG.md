@@ -10,6 +10,17 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-10
+
+### Changed
+
+- Sped up batch verification: proof points decode together ahead of transcript
+  reading, instance commitments walk doubling-free fixed-base tables (about
+  245 KiB prepared at warmup) with a bundle's shared anchor term computed once,
+  and RedPallas batch verification decodes its points together and runs its
+  equation on the worker pool for larger batches
+  ([#725](https://github.com/zakura-core/common/pull/725)).
+
 ## [0.1.1] - 2026-11-04
 
 ### Added

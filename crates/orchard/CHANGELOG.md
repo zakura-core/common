@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.3.1] - 2026-11-10
+
+### Changed
+
+- Batch validation with the Sensei backend now normalizes every bundle's value
+  commitments together with the binding keys and encodes statements across the
+  thread pool ([#725](https://github.com/zakura-core/common/pull/725)).
+
 ## [5.3.0] - 2026-11-06
 
 ### Changed
