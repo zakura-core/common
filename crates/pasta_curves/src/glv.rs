@@ -1940,6 +1940,12 @@ fn batch_invert_and_add<F: Field>(
     Some(())
 }
 
+/// Fewest bases per worker for which [`multiexp_parallel`] splits the
+/// windows left after its last full wave into per-worker term slices.
+/// Tests use a small threshold so the parallel MSM tests split windows too.
+#[cfg(feature = "multicore")]
+const MIN_REMAINDER_SLICE_BASES: usize = if cfg!(test) { 16 } else { 2048 };
+
 /// The widest window whose signed digits [`booth_digit_rows`] stores.
 const MAX_DIGIT_ROW_BITS: usize = 15;
 
@@ -2438,7 +2444,9 @@ const BUCKET_CHAIN_LEN: usize = 16;
 /// sum over the chains. An affine addition costs about half a projective
 /// one. Equal points double and opposite points cancel. Returns `None` only
 /// if the shared inversion fails; the caller then uses [`sum_buckets`].
-fn sum_buckets_batch<C: GlvParams>(windows: &[Vec<Option<AffinePoint<C::Base>>>]) -> Option<Vec<C>> {
+fn sum_buckets_batch<C: GlvParams>(
+    windows: &[Vec<Option<AffinePoint<C::Base>>>],
+) -> Option<Vec<C>> {
     let mut chains: Vec<(usize, usize, usize)> = Vec::new(); // (window, lo, hi)
     for (w, buckets) in windows.iter().enumerate() {
         let mut lo = 0;
@@ -2935,26 +2943,52 @@ fn multiexp_parallel<C: GlvParams>(
     // claim windows one at a time instead of taking a fixed stride: with
     // cores of unequal speed (Apple's performance and efficiency cores), a
     // fixed stride gives slow cores as many windows as fast ones.
-    let tasks = maybe_rayon::current_num_threads().clamp(1, window_count);
     let rows = (window_bits <= MAX_DIGIT_ROW_BITS)
         .then(|| booth_digit_rows(components, bases, window_bits, window_count));
     let width = components.len() * 2;
-    let next_window = core::sync::atomic::AtomicUsize::new(0);
+    // Whole windows go first. When the windows left over after the last
+    // full wave (`window_count % workers`) have enough terms, each is split
+    // into one slice of its terms per worker, so the last wave ends together
+    // instead of leaving workers idle; a window's bucket sum is linear in its
+    // terms, so the slices' sums add. Small slices cost more in bucket sums
+    // than the idle workers they save.
+    let workers = maybe_rayon::current_num_threads().max(1);
+    let n = components.len();
+    let remainder = if window_count > workers && n / workers >= MIN_REMAINDER_SLICE_BASES {
+        window_count % workers
+    } else {
+        0
+    };
+    let whole = window_count - remainder;
+    let slices = if remainder == 0 { 1 } else { workers };
+    let task_count = whole + remainder * slices;
+    let task = move |index: usize| -> (usize, core::ops::Range<usize>) {
+        if index < whole {
+            (index, 0..n)
+        } else {
+            let index = index - whole;
+            let (window, slice) = (whole + index / slices, index % slices);
+            (window, slice * n / slices..(slice + 1) * n / slices)
+        }
+    };
+    let tasks = workers.clamp(1, task_count);
+    let next_task = core::sync::atomic::AtomicUsize::new(0);
     let sums = par_map_indices(tasks, &|_| {
         with_window_scratch(|scratch| {
             let mut indices = Vec::new();
             let mut all = Vec::new();
-            for window in core::iter::from_fn(|| {
-                let window = next_window.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                (window < window_count).then_some(window)
+            for index in core::iter::from_fn(|| {
+                let index = next_task.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                (index < task_count).then_some(index)
             }) {
+                let (window, terms) = task(index);
                 indices.push(window);
-                let row = rows
-                    .as_deref()
-                    .map(|rows| &rows[window * width..(window + 1) * width]);
+                let row = rows.as_deref().map(|rows| {
+                    &rows[window * width + 2 * terms.start..window * width + 2 * terms.end]
+                });
                 all.push(fill_window_from::<C>(
-                    components,
-                    bases,
+                    &components[terms.clone()],
+                    &bases[terms],
                     window_bits,
                     window,
                     row,
@@ -2969,7 +3003,7 @@ fn multiexp_parallel<C: GlvParams>(
     let mut window_sums = alloc::vec![C::identity(); window_count];
     for task in sums {
         for (window, sum) in task? {
-            window_sums[window] = sum;
+            window_sums[window] += sum;
         }
     }
     let mut acc = C::identity();
@@ -8939,7 +8973,8 @@ mod bucket_sum_batch_tests {
                         .collect()
                 })
                 .collect();
-            let batched = sum_buckets_batch::<Ep>(&all).expect("random buckets are not exceptional");
+            let batched =
+                sum_buckets_batch::<Ep>(&all).expect("random buckets are not exceptional");
             for (buckets, sum) in all.iter().zip(batched) {
                 assert_eq!(sum, sum_buckets::<Ep>(buckets));
             }
@@ -9018,6 +9053,49 @@ mod digit_row_tests {
                         );
                     }
                 }
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "multicore"))]
+mod remainder_slice_tests {
+    use super::*;
+    use crate::{Eq, EqAffine, Fp};
+    use ff::Field;
+    use group::{Curve, Group};
+    use rand::SeedableRng;
+
+    /// Pools whose width does not divide the window count split the leftover
+    /// windows into term slices; the sum must match the serial MSM.
+    #[test]
+    fn parallel_msm_with_sliced_leftover_windows_matches_serial() {
+        let mut rng = rand_xorshift::XorShiftRng::from_seed([21u8; 16]);
+        let n = 600;
+        let points: Vec<Eq> = (0..n).map(|_| Eq::random(&mut rng)).collect();
+        let mut bases = vec![EqAffine::default(); n];
+        Eq::batch_normalize(&points, &mut bases);
+        let scalars: Vec<Fp> = (0..n).map(|_| Fp::random(&mut rng)).collect();
+        let components: Vec<_> = scalars
+            .iter()
+            .map(|s| {
+                decompose_montgomery::<Eq>(s)
+                    .and_then(checked_signed_magnitudes)
+                    .unwrap()
+            })
+            .collect();
+        let bases = multiexp_bases::<Eq>(&bases);
+        for window_bits in [5, 7, 8, 10] {
+            let serial = multiexp_serial::<Eq>(&components, &bases, window_bits).unwrap();
+            for threads in [3, 5] {
+                let pool = maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let parallel = pool
+                    .install(|| multiexp_parallel::<Eq>(&components, &bases, window_bits))
+                    .unwrap();
+                assert_eq!(parallel, serial, "w={window_bits} threads={threads}");
             }
         }
     }
