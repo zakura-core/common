@@ -2425,11 +2425,14 @@ impl<F> WindowScratch<F> {
     }
 }
 
-/// Largest [`WindowScratch`] a thread keeps between MSMs. Verifier-sized MSMs
-/// (a 64-bundle Orchard batch stages about 2 MiB per window) stay cached;
-/// larger prover MSMs amortize their own allocations.
+/// Largest [`WindowScratch`] a thread keeps between MSMs, per field. With the
+/// AVX2 radix-2^29 buffers, a 128-bundle Orchard batch's final MSM passes
+/// 8 MiB; freeing it after each MSM let glibc trim and re-fault it, which made
+/// that batch 5% slower at 4 workers on Zen 4. Larger MSMs amortize their
+/// own allocations. A thread can retain up to this much per field after its
+/// largest cached MSM.
 #[cfg(feature = "multicore")]
-const MAX_CACHED_WINDOW_SCRATCH_BYTES: usize = 8 << 20;
+const MAX_CACHED_WINDOW_SCRATCH_BYTES: usize = 64 << 20;
 
 /// Runs `f` with this thread's [`WindowScratch`] for `F`, and keeps it for the
 /// thread's next MSM.
