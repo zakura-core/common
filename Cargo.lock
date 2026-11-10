@@ -3674,7 +3674,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-sensei-artifacts"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "zakura-bento",
  "zakura-sensei-shared",
@@ -3683,7 +3683,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-sensei-macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3693,7 +3693,7 @@ dependencies = [
 
 [[package]]
 name = "zakura-sensei-shared"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "zakura-bento",
  "zakura-udon",
