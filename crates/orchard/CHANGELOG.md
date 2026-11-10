@@ -10,7 +10,15 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
-## [5.3.1] - 2026-11-10
+## [5.4.0] - 2026-11-10
+
+### Added
+
+- Added `Action::batch_from_encodings`, with `ActionEncoding` and
+  `ActionDecodeError`, which builds Actions from their wire encodings,
+  decoding all of their points together and accepting exactly what
+  `Action::from_parts` accepts after one-at-a-time decoding
+  ([#731](https://github.com/zakura-core/common/pull/731)).
 
 ### Changed
 

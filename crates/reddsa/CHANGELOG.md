@@ -10,6 +10,13 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.4.0] - 2026-11-10
+
+### Added
+
+- Added `From<pallas::Affine>` for Orchard spend authorization verification
+  keys ([#731](https://github.com/zakura-core/common/pull/731)).
+
 ## [5.3.0] - 2026-11-06
 
 ### Added
