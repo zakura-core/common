@@ -271,17 +271,53 @@ impl<'a> BatchValidator<'a> {
             proofs.push(proof);
         }
 
+        #[cfg(feature = "backend-halo2")]
+        {
+            let vk = self.vk;
+            let verify_proofs = move || {
+                let mut batch = crate::backend::halo2_proofs::plonk::BatchVerifier::new();
+                for (instances, proof) in proofs {
+                    batch.add_proof(instances, proof);
+                }
+                batch.finalize(&vk.params, &vk.vk)
+            };
+            // The signatures and the proofs are independent checks; a batch
+            // of a few bundles otherwise leaves most of the pool idle during
+            // either one.
+            #[cfg(feature = "multicore")]
+            let (signatures_valid, proofs_valid) = {
+                use rand::SeedableRng;
+                // The signature check runs as a pool task, with its own
+                // generator seeded from `rng`, while this thread verifies the
+                // proofs (whose final MSM reuses this thread's scratch).
+                let mut signature_rng = rand::rngs::StdRng::from_rng(&mut rng);
+                let mut signatures_valid = Ok(());
+                let proofs_valid = maybe_rayon::in_place_scope(|scope| {
+                    scope.spawn(|_| {
+                        signatures_valid = redpallas::verify_batch(&signatures, &mut signature_rng)
+                    });
+                    verify_proofs()
+                });
+                (signatures_valid, proofs_valid)
+            };
+            #[cfg(not(feature = "multicore"))]
+            let (signatures_valid, proofs_valid) = {
+                let signatures_valid = redpallas::verify_batch(&signatures, &mut rng);
+                (
+                    signatures_valid,
+                    signatures_valid.is_ok() && verify_proofs(),
+                )
+            };
+            if let Err(e) = signatures_valid {
+                debug!("RedPallas batch validation failed: {}", e);
+                return false;
+            }
+            proofs_valid
+        }
+        #[cfg(feature = "backend-sensei")]
         if let Err(e) = redpallas::verify_batch(&signatures, &mut rng) {
             debug!("RedPallas batch validation failed: {}", e);
             return false;
-        }
-        #[cfg(feature = "backend-halo2")]
-        {
-            let mut batch = crate::backend::halo2_proofs::plonk::BatchVerifier::new();
-            for (instances, proof) in proofs {
-                batch.add_proof(instances, proof);
-            }
-            batch.finalize(&self.vk.params, &self.vk.vk)
         }
         #[cfg(feature = "backend-sensei")]
         {
