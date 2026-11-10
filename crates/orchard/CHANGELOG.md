@@ -10,6 +10,22 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.4.0] - 2026-11-10
+
+### Added
+
+- Added `Action::batch_from_encodings`, with `ActionEncoding` and
+  `ActionDecodeError`, which builds Actions from their wire encodings,
+  decoding all of their points together and accepting exactly what
+  `Action::from_parts` accepts after one-at-a-time decoding
+  ([#731](https://github.com/zakura-core/common/pull/731)).
+
+### Changed
+
+- Batch validation with the Sensei backend now normalizes every bundle's value
+  commitments together with the binding keys and encodes statements across the
+  thread pool ([#725](https://github.com/zakura-core/common/pull/725)).
+
 ## [5.3.0] - 2026-11-06
 
 ### Changed
