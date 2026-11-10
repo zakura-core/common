@@ -1959,9 +1959,9 @@ fn batch_invert_and_add<F: Field>(
 const MIN_REMAINDER_SLICE_BASES: usize = if cfg!(test) { 16 } else { 2048 };
 
 /// [`multiexp_parallel`] recodes digit rows up front only when there are at
-/// least this many windows per worker.
+/// least this many windows per worker (as a fraction `num / den`).
 #[cfg(feature = "multicore")]
-const MIN_WINDOWS_PER_WORKER_FOR_ROWS: usize = 1;
+const MIN_WINDOWS_PER_WORKER_FOR_ROWS: (usize, usize) = (3, 2);
 
 /// The widest window whose signed digits [`booth_digit_rows`] stores.
 const MAX_DIGIT_ROW_BITS: usize = 15;
@@ -3028,11 +3028,13 @@ fn multiexp_parallel<C: GlvParams>(
     // fixed stride gives slow cores as many windows as fast ones.
     let workers = maybe_rayon::current_num_threads().max(1);
     // Recoding every window's digits up front is a separate parallel pass.
-    // With more workers than windows, each window's own recoding is cheaper
-    // than that extra pass (Ice Lake, 16 workers: rows cost 2-13% of the MSM;
-    // Zen 4 at 4-8 workers and Ice Lake at 4 gain 1-5% from the rows).
+    // With under 1.5 windows per worker, each window's own recoding is
+    // cheaper than that extra pass (Ice Lake, 16 workers: rows cost 2-13% of
+    // the MSM, including the 16-17 narrow windows of 1-4 bundle batches);
+    // Zen 4 at 4-8 workers and Ice Lake at 4 gain 1-5% from the rows.
     let rows = (window_bits <= MAX_DIGIT_ROW_BITS
-        && window_count >= MIN_WINDOWS_PER_WORKER_FOR_ROWS * workers)
+        && window_count * MIN_WINDOWS_PER_WORKER_FOR_ROWS.1
+            >= workers * MIN_WINDOWS_PER_WORKER_FOR_ROWS.0)
         .then(|| booth_digit_rows(components, bases, window_bits, window_count));
     let width = components.len() * 2;
     // Whole windows go first. When the windows left over after the last
