@@ -484,12 +484,19 @@ pub(crate) fn chord_level<const P0: u64, const P1: u64, const P2: u64, const P3:
         core::array::from_fn(|g| pack(&core::array::from_fn(|l| inverses[4 * g + l])));
 
     // The backward pass, expanded once per way of getting a group's
-    // denominator so that neither copy branches per group.
+    // denominator so that neither copy branches per group. Stored
+    // denominators keep the original order (multiplies before the loads);
+    // recomputed ones need the loads first.
     macro_rules! backward_pass {
-        (|$chunk:ident, $g:ident, $lx:ident, $rx:ident| $denominator:expr) => {
+        (
+            $chunk:ident, $g:ident, $lx:ident, $rx:ident, $slope:ident,
+            before_loads: { $($before:tt)* },
+            after_loads: { $($after:tt)* }
+        ) => {
             for $chunk in (0..chunks).rev() {
                 let base = $chunk * LANES;
                 for $g in 0..G {
+                    $($before)*
                     let first = base + 4 * $g;
                     let ops = [
                         operands(first),
@@ -500,11 +507,10 @@ pub(crate) fn chord_level<const P0: u64, const P1: u64, const P2: u64, const P3:
                     let $lx = load4([&ops[0].0.x, &ops[1].0.x, &ops[2].0.x, &ops[3].0.x]);
                     let ly = load4([&ops[0].0.y, &ops[1].0.y, &ops[2].0.y, &ops[3].0.y]);
                     let $rx = load4([&ops[0].1.x, &ops[1].1.x, &ops[2].1.x, &ops[3].1.x]);
-                    let slope = mul!(&scaled[$chunk][$g], &j[$g]);
-                    j[$g] = mul!(&j[$g], $denominator);
-                    let slope32 = shl5(&slope);
+                    $($after)*
+                    let slope32 = shl5(&$slope);
                     let x_sum = add(&$lx, &$rx);
-                    let x3 = sub(&mul!(&slope, &slope32), &x_sum, &k3);
+                    let x3 = sub(&mul!(&$slope, &slope32), &x_sum, &k3);
                     let y3 = sub(&mul!(&slope32, &sub(&$lx, &x3, &k5)), &ly, &k2);
                     let xs = store4(&canonical(&x3, &p));
                     let ys = store4(&canonical(&y3, &p));
@@ -519,9 +525,24 @@ pub(crate) fn chord_level<const P0: u64, const P1: u64, const P2: u64, const P3:
         };
     }
     if recompute {
-        backward_pass!(|chunk, g, lx, rx| &shl5(&sub(&rx, &lx, &k2)));
+        backward_pass!(
+            chunk, g, lx, rx, slope,
+            before_loads: {},
+            after_loads: {
+                let denominator = shl5(&sub(&rx, &lx, &k2));
+                let slope = mul!(&scaled[chunk][g], &j[g]);
+                j[g] = mul!(&j[g], &denominator);
+            }
+        );
     } else {
-        backward_pass!(|chunk, g, lx, rx| &denominators[chunk][g]);
+        backward_pass!(
+            chunk, g, lx, rx, slope,
+            before_loads: {
+                let slope = mul!(&scaled[chunk][g], &j[g]);
+                j[g] = mul!(&j[g], &denominators[chunk][g]);
+            },
+            after_loads: {}
+        );
     }
     Some(())
 }
