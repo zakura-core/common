@@ -141,6 +141,44 @@ pub struct BatchValidator<'a> {
     vk: &'a VerifyingKey,
 }
 
+/// Batches of at most this many bundles per worker verify their RedPallas
+/// signatures on the pool alongside the proofs. On Zen 4 this keeps the gains
+/// up to 16 bundles at 4 workers (-2.5%) and 32 at 8, while overlapping larger
+/// batches measured +2% (2 workers, 128-512 bundles; 8 workers, 512).
+#[cfg(all(feature = "backend-halo2", feature = "multicore"))]
+const OVERLAP_BUNDLES_PER_WORKER: usize = 4;
+
+/// Verifies `signatures` as a pool task while this thread runs
+/// `verify_proofs`.
+#[cfg(feature = "backend-halo2")]
+fn verify_overlapped(
+    signatures: &[redpallas::BatchItem],
+    rng: &mut impl rand::CryptoRng,
+    verify_proofs: impl FnOnce() -> bool,
+) -> (Result<(), redpallas::Error>, bool) {
+    #[cfg(feature = "multicore")]
+    {
+        use rand::SeedableRng;
+        let mut signature_rng = rand::rngs::StdRng::from_rng(rng);
+        let mut signatures_valid = Ok(());
+        let proofs_valid = maybe_rayon::in_place_scope(|scope| {
+            scope.spawn(|_| {
+                signatures_valid = redpallas::verify_batch(signatures, &mut signature_rng)
+            });
+            verify_proofs()
+        });
+        (signatures_valid, proofs_valid)
+    }
+    #[cfg(not(feature = "multicore"))]
+    {
+        let signatures_valid = redpallas::verify_batch(signatures, rng);
+        (
+            signatures_valid,
+            signatures_valid.is_ok() && verify_proofs(),
+        )
+    }
+}
+
 impl<'a> BatchValidator<'a> {
     /// Constructs a new batch validation context that validates against `vk`.
     pub fn new(vk: &'a VerifyingKey) -> Self {
@@ -281,27 +319,20 @@ impl<'a> BatchValidator<'a> {
                 }
                 batch.finalize(&vk.params, &vk.vk)
             };
-            // The signatures and the proofs are independent checks; a batch
-            // of a few bundles otherwise leaves most of the pool idle during
-            // either one.
+            // The signatures and the proofs are independent checks. A batch of
+            // a few bundles leaves most of the pool idle during either one, so
+            // it checks the signatures as a pool task, with a generator seeded
+            // from `rng`, while this thread verifies the proofs (whose final
+            // MSM reuses this thread's scratch). Larger batches keep the pool
+            // busy already, and their signature MSM is itself parallel, so
+            // overlapping only interleaves the two.
             #[cfg(feature = "multicore")]
-            let (signatures_valid, proofs_valid) = {
-                use rand::SeedableRng;
-                // The signature check runs as a pool task, with its own
-                // generator seeded from `rng`, while this thread verifies the
-                // proofs (whose final MSM reuses this thread's scratch).
-                let mut signature_rng = rand::rngs::StdRng::from_rng(&mut rng);
-                let mut signatures_valid = Ok(());
-                let proofs_valid = maybe_rayon::in_place_scope(|scope| {
-                    scope.spawn(|_| {
-                        signatures_valid = redpallas::verify_batch(&signatures, &mut signature_rng)
-                    });
-                    verify_proofs()
-                });
-                (signatures_valid, proofs_valid)
-            };
+            let overlap = count <= OVERLAP_BUNDLES_PER_WORKER * maybe_rayon::current_num_threads();
             #[cfg(not(feature = "multicore"))]
-            let (signatures_valid, proofs_valid) = {
+            let overlap = false;
+            let (signatures_valid, proofs_valid) = if overlap {
+                verify_overlapped(&signatures, &mut rng, verify_proofs)
+            } else {
                 let signatures_valid = redpallas::verify_batch(&signatures, &mut rng);
                 (
                     signatures_valid,
