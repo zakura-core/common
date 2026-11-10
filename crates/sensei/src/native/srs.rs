@@ -13,7 +13,7 @@
 //! | Workers | `executor::PoolExecutor::get` retains one executor for the process lifetime. Both runtimes borrow it; initializing the executor does not initialize either role. |
 //! | Prover preparation | `runtime::RUNTIME` owns `PreparedProver`, including circuit and polynomial preparation selected by `tuning`. It does not prepare verifier keys. |
 //! | Verifier preparation | `verifier::RUNTIME` owns the expanded verifying-key bank and version-index lists. It does not construct the prover's circuit state. Equal-width SRS and verifier banks share residue codebooks from [`Codebooks`]. |
-//! | Scratch | Each active call owns its workspace and lends it mutably to computation. Prover scratch covers the proof pipeline; verifier retention applies only to the final combined MSM, not its worker-local equation scratch. |
+//! | Scratch | Each active call owns its workspace and lends it mutably to computation. Prover scratch covers the proof pipeline; verifier calls lease their per-chunk equation scratch and final-MSM workspace from `verifier::RUNTIME`'s bounded idle pools. |
 //!
 //! Each role obtains [`PreparedSrs::shared`] before entering the executor for
 //! its own preparation. SRS initialization uses serial loaders and does not
@@ -30,20 +30,26 @@
 //!
 //! # Workspace retention
 //!
-//! [`tuning::WORKSPACE`](crate::tuning::WORKSPACE) currently selects `Discard`:
-//! workspaces are created per call and released on return or unwinding, while
-//! preparation and workers remain alive. Under `RetainOne`, each role instead
-//! has one idle slot. A call takes that slot under a mutex, or creates a fresh
-//! workspace if it is empty, then releases the lock before doing work. On
-//! normal return, including an error, it restores its workspace only if the
-//! slot is still empty; concurrent calls can therefore use independent scratch
-//! without retaining a workspace per caller. Unwinding drops the active
-//! workspace without returning it to the slot. Allocators may retain freed
-//! pages under either policy.
+//! The prover's [`tuning::WORKSPACE`](crate::tuning::WORKSPACE) currently
+//! selects `Discard`: workspaces are created per call and released on return
+//! or unwinding, while preparation and workers remain alive. Under
+//! `RetainOne`, the prover instead has one idle slot. A call takes that slot
+//! under a mutex, or creates a fresh workspace if it is empty, then releases
+//! the lock before doing work. On normal return, including an error, it
+//! restores its workspace only if the slot is still empty; concurrent calls
+//! can therefore use independent scratch without retaining a workspace per
+//! caller. Unwinding drops the active workspace without returning it to the
+//! slot. Allocators may retain freed pages under either policy.
 //!
-//! Both runtime caches recover a poisoned idle-slot mutex with `into_inner`.
-//! This permits reuse of the slot; it does not turn a panicking computation
-//! into a successful one. Worker coordination keeps its separate, strict lock
+//! The verifier retains scratch in bounded idle pools instead: equation
+//! scratch and final-MSM workspaces return after success and reported errors,
+//! within the slot counts and per-entry capacity ceilings in
+//! [`tuning`](crate::tuning). The verifier module's scratch section describes
+//! the lease protocol; `Discard` behavior corresponds to zero slots.
+//!
+//! Both runtime caches recover a poisoned idle mutex with `into_inner`. This
+//! permits reuse of the slots; it does not turn a panicking computation into
+//! a successful one. Worker coordination keeps its separate, strict lock
 //! handling. No workspace lock is held during RNG callbacks or pool execution.
 
 use alloc::{sync::Arc, vec::Vec};

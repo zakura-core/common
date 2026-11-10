@@ -54,10 +54,58 @@ pub(crate) const EXPANSION_SCALES: OptionalPreparation = OptionalPreparation::Wa
 pub(crate) const INSTANCE_BASES: Preparation = Preparation::WarmUp;
 /// 1.5 MiB of boundary cosets.
 pub(crate) const BOUNDARIES: Preparation = Preparation::WarmUp;
-/// Scratch is reused within a proving or verification call. Discard releases it
-/// after success or failure; prepared data and workers remain alive. Allocators
-/// may retain pages.
+/// Prover scratch is reused within one proving call. Discard releases it after
+/// success or failure; prepared data and workers remain alive. Allocators may
+/// retain pages. Verifier scratch has its own bounded retention policy below.
 pub(crate) const WORKSPACE: WorkspaceRetention = WorkspaceRetention::Discard;
+
+// Per-operation task budgets within the configured worker pool. Each
+// operation requests at most its cap of concurrent tasks; the pool's worker
+// count bounds them all, and `usize::MAX` leaves an operation at the full
+// pool budget. The minimum-work floors below still apply within a cap, so a
+// small request never fans out merely because workers are available.
+// A 16-core M-series sweep (2026-11-10) found no cap worth defaulting:
+// proving and both verification phases were flat or improving through 16
+// workers. Platforms whose optima differ (for example SMT machines) can cap
+// an operation here without resizing the pool.
+/// Task cap for the proof pipeline. Preparation and warmup keep the full pool.
+pub(crate) const PROVING_TASK_CAP: usize = usize::MAX;
+/// Task cap for verification proof folding.
+pub(crate) const VERIFY_FOLD_TASK_CAP: usize = usize::MAX;
+/// Task cap for the final verification equation's MSM.
+pub(crate) const VERIFY_MSM_TASK_CAP: usize = usize::MAX;
+/// Minimum Actions of proof-folding work per verification chunk before an
+/// additional chunk is cut; a batch below one floor folds on the calling
+/// thread without entering the pool's scheduler. Folding one two-Action proof
+/// costs ~0.35 ms against ~50 µs of dispatch (M-series measurement), so the
+/// floor stays low: it serializes only single-proof and all-single-Action
+/// pairs, never a batch whose proofs each carry two or more Actions.
+pub(crate) const VERIFY_FOLD_MIN_ACTIONS: usize = 2;
+/// Minimum final-equation MSM terms per requested task. A small batch asks
+/// for fewer workers instead of slicing its terms thinner; a one-proof batch
+/// carries about 2,200 terms, so this floor requests roughly eight tasks for
+/// it (the measured small-batch optimum; pending revalidation on x86_64).
+pub(crate) const VERIFY_MSM_MIN_TERMS: usize = 256;
+
+// Bounded idle verification scratch, retained across calls. Each verification
+// call leases per-chunk equation scratch and one final-MSM workspace, and
+// returns them — on success and on error — to process-wide pools holding at
+// most SLOTS entries each. A returned item whose retained capacity exceeds
+// its byte ceiling is dropped instead, so retained memory never exceeds
+// SLOTS × MAX_BYTES per pool. Unwinding drops the active scratch. Concurrent
+// calls beyond the slot counts allocate fresh scratch and discard it.
+// Measured anchors (two-Action proofs): a 64-proof batch retains sixteen
+// chunk equations of ≤0.7 MiB and a 25.8 MiB workspace; a 256-proof batch's
+// workspace is 41.4 MiB, and only its merged combined equation exceeds the
+// equation ceiling.
+/// Idle equation-scratch entries; sized for one pool's worth of fold chunks.
+pub(crate) const VERIFIER_EQUATION_SLOTS: usize = 16;
+/// Per-entry retained-capacity ceiling for pooled equation scratch.
+pub(crate) const VERIFIER_EQUATION_MAX_BYTES: usize = 4 << 20;
+/// Idle final-MSM workspaces; one per concurrently verifying batch.
+pub(crate) const VERIFIER_WORKSPACE_SLOTS: usize = 4;
+/// Per-entry retained-capacity ceiling for pooled final-MSM workspaces.
+pub(crate) const VERIFIER_WORKSPACE_MAX_BYTES: usize = 48 << 20;
 
 // Shared SRS acceleration: both roles use these tables and preparation policies.
 // The SRS/prover expansions have explicit memory ceilings in COMMITMENT_TABLES.

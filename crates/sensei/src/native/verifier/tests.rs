@@ -304,11 +304,29 @@ fn archived_current_proofs_have_no_action_count_ceiling() {
     }
 }
 
-#[test]
-fn discard_releases_verifier_scratch_after_success_and_failure() {
-    if tuning::WORKSPACE != WorkspaceRetention::Discard {
-        return;
+/// The pool invariants every verification path must restore: bounded slot
+/// counts and per-entry retained capacities within their tuning ceilings.
+/// Shared with the version matrix; the pools are process-global, so these are
+/// invariant checks rather than exact-occupancy assertions.
+pub(super) fn assert_scratch_pools_bounded() {
+    let scratch = &VerifierRuntime::get().scratch;
+    let equations = lock(&scratch.equations);
+    assert!(equations.len() <= tuning::VERIFIER_EQUATION_SLOTS);
+    for equation in equations.iter() {
+        assert!(equation.retained_bytes() <= tuning::VERIFIER_EQUATION_MAX_BYTES);
+        assert!(equation.points.is_empty() && equation.scalars.is_empty());
+        assert_eq!(equation.versions, 0);
     }
+    drop(equations);
+    let workspaces = lock(&scratch.workspaces);
+    assert!(workspaces.len() <= tuning::VERIFIER_WORKSPACE_SLOTS);
+    for workspace in workspaces.iter() {
+        assert!(workspace.retained_bytes() <= tuning::VERIFIER_WORKSPACE_MAX_BYTES);
+    }
+}
+
+#[test]
+fn bounded_pools_survive_success_and_failure() {
     let (statements, proof) = fixture();
     let mut altered = proof.clone();
     let offset = proof.len() - 32;
@@ -322,12 +340,199 @@ fn discard_releases_verifier_scratch_after_success_and_failure() {
             crate::verify_proofs(&[request; 16], &mut || Ok(71)),
             expected
         );
-        assert!(VerifierRuntime::get().idle.lock().unwrap().is_none());
+        assert_scratch_pools_bounded();
     }
     let request =
         VerificationRequest::new(crate::CircuitVersion::PostNu6_3, &statements, &proof).unwrap();
     assert_eq!(crate::verify_proofs(&[request], &mut no_rng), Ok(()));
-    assert!(VerifierRuntime::get().idle.lock().unwrap().is_none());
+    assert_scratch_pools_bounded();
+}
+
+#[test]
+fn scratch_pool_returns_reset_entries_and_honors_ceilings() {
+    let scratch = VerifierScratch::new();
+    // A used equation returns reset, with its capacity retained for reuse.
+    let mut equation = scratch.lease_equation();
+    equation.versions = 3;
+    equation.fixed[0] = <Fp>::ONE;
+    equation
+        .points
+        .push(PreparedAffinePoint::from_affine(&VestaAffine::GENERATOR));
+    equation.scalars.push(<Fp>::ONE);
+    scratch.return_equation(equation);
+    {
+        let pooled = lock(&scratch.equations);
+        assert_eq!(pooled.len(), 1);
+        assert_eq!(pooled[0].versions, 0);
+        assert!(pooled[0].fixed[0].is_zero());
+        assert!(pooled[0].points.is_empty());
+        assert!(pooled[0].points.capacity() > 0, "capacity is retained");
+    }
+    let reused = scratch.lease_equation();
+    assert!(lock(&scratch.equations).is_empty());
+    scratch.return_equation(reused);
+    // An entry above the retained-capacity ceiling is dropped, not pooled.
+    let mut oversized = scratch.lease_equation();
+    oversized
+        .scalars
+        .reserve(tuning::VERIFIER_EQUATION_MAX_BYTES / size_of::<Fp>() + 1);
+    scratch.return_equation(oversized);
+    assert!(lock(&scratch.equations).is_empty());
+    // A full pool drops further returns instead of growing.
+    for _ in 0..tuning::VERIFIER_EQUATION_SLOTS + 3 {
+        scratch.return_equation(Equation::new());
+    }
+    assert_eq!(
+        lock(&scratch.equations).len(),
+        tuning::VERIFIER_EQUATION_SLOTS
+    );
+    for _ in 0..tuning::VERIFIER_WORKSPACE_SLOTS + 3 {
+        scratch.return_workspace(MsmWorkspace::new());
+    }
+    assert_eq!(
+        lock(&scratch.workspaces).len(),
+        tuning::VERIFIER_WORKSPACE_SLOTS
+    );
+}
+
+#[test]
+fn warm_up_scratch_provisions_a_matching_workspace() {
+    let runtime = VerifierRuntime::get();
+    let (statements, proof) = fixture();
+    let request =
+        VerificationRequest::new(crate::CircuitVersion::PostNu6_3, &statements, &proof).unwrap();
+    let mut combined = Equation::new();
+    for weight in 1..5 {
+        combined
+            .proof(
+                &request,
+                <Fp>::from_u64(weight),
+                &runtime.instance_generators,
+            )
+            .unwrap();
+    }
+    let mut workspace = MsmWorkspace::new();
+    runtime.provision_workspace(&mut workspace, combined.points.len());
+    let provisioned = workspace.retained_bytes();
+    assert!(provisioned > 0);
+    // The synthetic full-width provisioning shapes match a real batch: the
+    // provisioned workspace evaluates it without growing.
+    runtime.evaluate(&combined, &mut workspace).unwrap();
+    assert_eq!(workspace.retained_bytes(), provisioned);
+    // The public entry point keeps the global pools within their bounds.
+    crate::warm_up_verifier_scratch(16, 32);
+    assert_scratch_pools_bounded();
+    crate::warm_up_verifier_scratch(0, 0);
+    assert_scratch_pools_bounded();
+}
+
+#[test]
+fn task_budgets_follow_the_work() {
+    // Folding: one chunk per Action floor, bounded by proofs and the cap.
+    let floor = tuning::VERIFY_FOLD_MIN_ACTIONS;
+    assert_eq!(fold_jobs(16, 1, 1), 1);
+    assert_eq!(fold_jobs(16, 1, floor * 16), 1, "a proof is one unit");
+    assert_eq!(
+        fold_jobs(16, 2, floor - 1),
+        1,
+        "below one floor stays serial"
+    );
+    assert_eq!(fold_jobs(16, 8, floor * 4), 4);
+    assert_eq!(fold_jobs(16, 128, floor * 128), 16, "capped by the pool");
+    assert_eq!(fold_jobs(2, 128, floor * 128), 2);
+    assert_eq!(fold_jobs(0, 128, floor * 128), 1, "a zero cap means serial");
+    // The final MSM: its fixed segments alone span several term floors.
+    let fixed = N + VERIFIER_POINT_COUNT + INSTANCE_VALUE_COUNT;
+    let min = tuning::VERIFY_MSM_MIN_TERMS;
+    assert_eq!(msm_tasks(32, 0), (fixed / min).clamp(1, 32));
+    assert_eq!(msm_tasks(1, 1 << 20), 1);
+    assert_eq!(msm_tasks(0, 1 << 20), 1, "a zero cap means serial");
+    assert_eq!(
+        msm_tasks(usize::MAX, min * 64),
+        (fixed + min * 64) / min,
+        "large batches scale with their terms"
+    );
+}
+
+#[test]
+#[ignore = "manual cold-call benchmark; one fresh process per measurement, --nocapture"]
+fn benchmark_cold_verification() {
+    use std::time::Instant;
+    let batch: usize = std::env::var("SENSEI_COLD_BATCH")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(64);
+    let fixture = corpus::current(2);
+    let requests = vec![fixture.request(); batch];
+    let scratch = std::env::var_os("SENSEI_COLD_SCRATCH").is_some();
+    let start = Instant::now();
+    if scratch {
+        crate::warm_up_verifier_scratch(batch, batch * fixture.statements.len());
+    } else {
+        crate::warm_up_verifier();
+    }
+    let warm = start.elapsed();
+    let start = Instant::now();
+    crate::verify_proofs(&requests, &mut || Ok(93)).unwrap();
+    let first = start.elapsed();
+    let start = Instant::now();
+    crate::verify_proofs(&requests, &mut || Ok(95)).unwrap();
+    let second = start.elapsed();
+    println!(
+        "cold batch={batch} scratch={scratch} warm_up={warm:?} first={first:?} second={second:?}"
+    );
+    let pools = &VerifierRuntime::get().scratch;
+    let equations = lock(&pools.equations);
+    let equation_bytes: usize = equations.iter().map(Equation::retained_bytes).sum();
+    let (equation_count, max_equation) = (
+        equations.len(),
+        equations.iter().map(Equation::retained_bytes).max(),
+    );
+    drop(equations);
+    let workspaces = lock(&pools.workspaces);
+    let workspace_bytes: Vec<usize> = workspaces
+        .iter()
+        .map(MsmWorkspace::retained_bytes)
+        .collect();
+    println!(
+        "pooled equations={equation_count} bytes={equation_bytes} max={max_equation:?} \
+         workspaces={} bytes={workspace_bytes:?}",
+        workspace_bytes.len()
+    );
+}
+
+#[test]
+#[ignore = "manual concurrent verification benchmark; run with --nocapture under /usr/bin/time -l"]
+fn benchmark_concurrent_verification() {
+    use std::time::Instant;
+    let setting = |name, default| {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(default)
+    };
+    let threads: usize = setting("SENSEI_CONCURRENT", 4);
+    let batch: usize = setting("SENSEI_CONCURRENT_BATCH", 32);
+    let rounds: usize = setting("SENSEI_CONCURRENT_ROUNDS", 50);
+    let fixture = corpus::current(2);
+    crate::warm_up_verifier();
+    let start = Instant::now();
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                let requests = vec![fixture.request(); batch];
+                for _ in 0..rounds {
+                    crate::verify_proofs(&requests, &mut || Ok(97)).unwrap();
+                }
+            });
+        }
+    });
+    let elapsed = start.elapsed();
+    println!(
+        "concurrent threads={threads} batch={batch} rounds={rounds} \
+         total={elapsed:?} per-batch={:.3}ms",
+        elapsed.as_secs_f64() * 1e3 / (threads * rounds) as f64
+    );
 }
 
 #[test]

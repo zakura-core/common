@@ -18,10 +18,17 @@
 //! shares prepared SRS tables, codebooks, and workers with
 //! proving, and never initializes the prover's circuit state. The first nonempty
 //! `verify_proofs` call prepares the verifier on demand; `warm_up_verifier`
-//! can do this eagerly. Warming either role prepares the shared SRS once; warming
+//! can do this eagerly, and `warm_up_verifier_scratch` can additionally
+//! provision verification scratch for an expected batch shape. Warming either
+//! role prepares the shared SRS once; warming
 //! the other then prepares only its remaining state. `warm_up` warms both roles.
 //! Each verification request selects its `CircuitVersion`; batches may mix
 //! versions and share one final verification equation. Keys are embedded.
+//!
+//! `configure_workers` optionally bounds the shared worker pool before the
+//! first proof, verification, or warm-up call; `worker_budget` reports the
+//! pool's final budget. Unconfigured processes honor a positive integer
+//! `RAYON_NUM_THREADS` before falling back to the detected parallelism.
 //!
 //! [`redpallas`] provides signing, spend-key randomization, and individual or
 //! batch signature verification. Its generator preparation is independent of
@@ -178,6 +185,8 @@ mod types;
 mod verification_corpus;
 
 pub use error::Error;
+#[cfg(any(feature = "prover", feature = "verifier"))]
+pub use error::WorkersConfigError;
 pub use primitives::{Fp, Fq, Fr, NonIdentityPallasPoint, PallasPoint, SpendValidatingKey};
 pub use rng::{RandomSource, RandomnessError};
 #[cfg(feature = "verifier")]
@@ -231,6 +240,42 @@ pub fn warm_up() {
     warm_up_verifier();
 }
 
+/// Sets the worker budget for the process-wide pool shared by proving,
+/// verification, and pooled RedPallas batch verification.
+///
+/// Call this before the first proving, verification, or warm-up API call in
+/// the process: the budget is read once when the shared executor initializes
+/// and is final afterwards. Precedence is Rayon-consistent: this explicit
+/// budget wins; otherwise a positive integer `RAYON_NUM_THREADS` sizes the
+/// pool (a zero or unparseable value is ignored), and the detected available
+/// parallelism is the fallback. The pool is private to Sensei, so neither
+/// this budget nor the environment variable selects or resizes Rayon's global
+/// pool. Without the `multicore` feature execution is serial and an accepted
+/// budget has no effect.
+///
+/// # Errors
+///
+/// Returns [`WorkersConfigError::Zero`] for a zero budget,
+/// [`WorkersConfigError::AlreadyConfigured`] for a repeated call, and
+/// [`WorkersConfigError::AlreadyInitialized`] once the shared executor
+/// exists, in which case the running pool keeps its workers.
+#[cfg(any(feature = "prover", feature = "verifier"))]
+pub fn configure_workers(workers: usize) -> Result<(), WorkersConfigError> {
+    native::executor::configure(workers)
+}
+
+/// Returns the shared pool's worker budget, initializing the shared workers —
+/// but neither proof role's preparation — if needed.
+///
+/// After this returns, [`configure_workers`] reports
+/// [`WorkersConfigError::AlreadyInitialized`]. Admission control can combine
+/// this budget with per-batch workload when bounding concurrent verification.
+/// Without the `multicore` feature this is always one.
+#[cfg(any(feature = "prover", feature = "verifier"))]
+pub fn worker_budget() -> usize {
+    native::executor::worker_budget()
+}
+
 /// Eagerly builds the shared SRS and per-process proving state that the first
 /// [`create_proof`] call would otherwise build on demand.
 ///
@@ -268,6 +313,24 @@ pub fn warm_up_prover() {
 #[cfg(feature = "verifier")]
 pub fn warm_up_verifier() {
     native::verifier::warm_up_verifier();
+}
+
+/// Optionally provisions bounded verification scratch for an expected batch of
+/// `proofs` proofs totalling `actions` Actions, on top of [`warm_up_verifier`]
+/// (which it performs first and which allocates no batch scratch itself).
+///
+/// The first large batch otherwise pays for growing per-chunk equation scratch
+/// and the final-MSM workspace. This reserves those capacities — assuming the
+/// Actions are spread uniformly across the proofs — and retains them in the
+/// idle scratch pools that `verify_proofs` leases from, bringing a cold call
+/// near its steady-state latency. Provisioning is capacity-only: a real batch
+/// still plans its own work and grows any residual shortfall, and a shape
+/// larger than the pools' per-entry retention ceilings is provisioned but not
+/// retained. Calling again with a larger shape tops the pools up; `proofs` of
+/// zero only warms the verifier. Consumes no randomness.
+#[cfg(feature = "verifier")]
+pub fn warm_up_verifier_scratch(proofs: usize, actions: usize) {
+    native::verifier::warm_up_verifier_scratch(proofs, actions);
 }
 
 /// Verifies a batch of Action proofs for their selected circuit versions and

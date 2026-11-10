@@ -388,7 +388,7 @@ impl<C: PastaCurve> MsmWorkspace<C> {
         result
     }
 
-    #[cfg(all(test, feature = "prover", feature = "verifier"))]
+    #[cfg(feature = "verifier")]
     pub(crate) fn retained_bytes(&self) -> usize {
         // The returned-slot requirement is the same as for capacities.
         let mut bytes = self.retained.capacity() * size_of::<Retained<C>>()

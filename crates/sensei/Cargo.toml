@@ -63,3 +63,11 @@ required-features = ["prover", "verifier"]
 [[test]]
 name = "verification"
 required-features = ["verifier"]
+
+[[test]]
+name = "parallelism"
+required-features = ["verifier"]
+
+[[test]]
+name = "worker_env"
+required-features = ["verifier"]

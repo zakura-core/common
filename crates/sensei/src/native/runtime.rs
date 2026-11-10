@@ -190,7 +190,10 @@ pub(crate) fn prove(
                 request,
                 randomness,
                 workspace,
-                Execution::new(context, runtime.executor.budget()),
+                Execution::new(
+                    context,
+                    runtime.executor.budget_capped(tuning::PROVING_TASK_CAP),
+                ),
                 #[cfg(test)]
                 timing,
             )
