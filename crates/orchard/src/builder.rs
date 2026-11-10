@@ -1628,7 +1628,17 @@ impl<S: InProgressSignatures, V> Bundle<InProgress<Unproven, S>, V> {
     pub fn create_proof(
         self,
         pk: &ProvingKey,
+        rng: impl Rng,
+    ) -> Result<Bundle<InProgress<Proof, S>, V>, BuildError> {
+        self.create_proof_cancellable(pk, rng, &crate::circuit::ProofCancellation::default())
+    }
+
+    /// Creates a proof with cooperative cancellation at supported backend checkpoints.
+    pub fn create_proof_cancellable(
+        self,
+        pk: &ProvingKey,
         mut rng: impl Rng,
+        cancellation: &crate::circuit::ProofCancellation,
     ) -> Result<Bundle<InProgress<Proof, S>, V>, BuildError> {
         let instances: Vec<_> = self
             .actions()
@@ -1639,7 +1649,13 @@ impl<S: InProgressSignatures, V> Bundle<InProgress<Unproven, S>, V> {
             &mut (),
             |_, _, a| Ok(a),
             |_, auth| {
-                let proof = auth.create_proof(pk, &instances, &mut rng)?;
+                let proof = Proof::create_cancellable(
+                    pk,
+                    &auth.proof.circuits,
+                    &instances,
+                    &mut rng,
+                    cancellation,
+                )?;
                 Ok(InProgress {
                     proof,
                     sigs: auth.sigs,

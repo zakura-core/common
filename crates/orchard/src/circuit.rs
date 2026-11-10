@@ -27,6 +27,23 @@ pub(crate) use selected::Circuit;
 pub use selected::ProvingKey;
 pub use selected::VerifyingKey;
 
+/// A cooperative cancellation signal for proof construction.
+/// Clones refer to the same signal; cancellation is permanent.
+#[derive(Clone, Debug, Default)]
+pub struct ProofCancellation(alloc::sync::Arc<core::sync::atomic::AtomicBool>);
+
+impl ProofCancellation {
+    /// Requests cancellation at the next supported computation checkpoint.
+    pub fn cancel(&self) {
+        self.0.store(true, core::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(core::sync::atomic::Ordering::Acquire)
+    }
+}
+
 /// Selects which version of the Orchard Action circuit to build.
 ///
 /// [`FixedPostNu6_2`] and [`InsecurePreNu6_2`] produce different verifying keys: the fixed
@@ -160,6 +177,8 @@ use core::fmt;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ProofError {
+    /// Proof construction was cancelled by the caller.
+    Cancelled,
     /// The request is malformed: it is empty, its circuits and statements disagree in
     /// number or circuit version, it selects a circuit version that does not support the
     /// operation, or a statement disables cross-address transfers under a key whose
@@ -179,6 +198,7 @@ pub enum ProofError {
 impl fmt::Display for ProofError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::Cancelled => "proof construction cancelled",
             Self::InvalidInput => "invalid proof input",
             Self::InvalidProof => "invalid proof",
             Self::InternalInvariant => "internal proof invariant failed",
