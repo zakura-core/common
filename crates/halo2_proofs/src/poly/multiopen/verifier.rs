@@ -94,6 +94,162 @@ fn compute_msm_eval<F: Field>(
     Ok(msm_eval)
 }
 
+/// The most evaluations one commitment keeps inline in
+/// [`construct_verifier_sets`]; more fall back to the generic construction.
+const INLINE_EVALS: usize = 8;
+
+/// Hashes a commitment reference's address with one multiplication.
+#[derive(Default)]
+struct AddressHasher(u64);
+
+impl std::hash::Hasher for AddressHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 = (self.0.rotate_left(8) ^ u64::from(byte)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        }
+    }
+    fn write_usize(&mut self, value: usize) {
+        self.0 = (self.0 ^ value as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    }
+}
+
+/// One commitment's evaluations, ordered by point index, from either
+/// construction.
+enum Evals<F> {
+    Inline(InlineEvals<F>),
+    Heap(Vec<F>),
+}
+
+impl<F> Evals<F> {
+    fn as_slice(&self) -> &[F] {
+        match self {
+            Evals::Inline(evals) => &evals.evals[..evals.len],
+            Evals::Heap(evals) => evals,
+        }
+    }
+}
+
+/// One commitment's evaluations, ordered by point index.
+#[derive(Clone, Copy)]
+struct InlineEvals<F> {
+    len: usize,
+    points: [u8; INLINE_EVALS],
+    evals: [F; INLINE_EVALS],
+}
+
+/// The verifier's form of `construct_intermediate_sets`: the same commitment
+/// order, point sets, set indices and evaluation order, built in one pass
+/// with each commitment's point set as a bit mask and its evaluations inline,
+/// instead of several small vectors and tree nodes per commitment. Returns
+/// `Err(())` for shapes it does not represent (more than `usize::BITS` points
+/// or [`INLINE_EVALS`] evaluations per commitment), and `Ok(None)` where the
+/// generic construction returns `None`.
+#[allow(clippy::type_complexity)]
+fn construct_verifier_sets<'r, 'params: 'r, C: CurveAffine, I>(
+    queries: I,
+) -> Result<
+    Option<(
+        Vec<(
+            CommitmentReference<'r, 'params, C>,
+            usize,
+            InlineEvals<C::Scalar>,
+        )>,
+        Vec<Vec<C::Scalar>>,
+    )>,
+    (),
+>
+where
+    I: IntoIterator<Item = VerifierQuery<'r, 'params, C>>,
+{
+    let queries = queries.into_iter();
+    let capacity = queries.size_hint().0;
+    let mut points: Vec<C::Scalar> = Vec::new();
+    let mut commitments: Vec<(
+        CommitmentReference<'r, 'params, C>,
+        usize,
+        InlineEvals<C::Scalar>,
+    )> = Vec::with_capacity(capacity);
+    // Commitment references hash and compare by address.
+    #[allow(clippy::mutable_key_type)]
+    let mut indices: std::collections::HashMap<
+        CommitmentReference<'r, 'params, C>,
+        usize,
+        std::hash::BuildHasherDefault<AddressHasher>,
+    > = std::collections::HashMap::with_capacity_and_hasher(capacity, Default::default());
+    for query in queries {
+        let point = query.get_point();
+        let point_index = match points.iter().position(|p| *p == point) {
+            Some(index) => index,
+            None => {
+                if points.len() == usize::BITS as usize {
+                    return Err(());
+                }
+                points.push(point);
+                points.len() - 1
+            }
+        };
+        let commitment = query.get_commitment();
+        let index = *indices.entry(commitment).or_insert_with(|| {
+            commitments.push((
+                commitment,
+                0,
+                InlineEvals {
+                    len: 0,
+                    points: [0; INLINE_EVALS],
+                    evals: [C::Scalar::ZERO; INLINE_EVALS],
+                },
+            ));
+            commitments.len() - 1
+        });
+        let (_, mask, evals) = &mut commitments[index];
+        let bit = 1usize << point_index;
+        if *mask & bit != 0 {
+            return Ok(None);
+        }
+        if evals.len == INLINE_EVALS {
+            return Err(());
+        }
+        *mask |= bit;
+        // Insert in point-index order.
+        let mut at = evals.len;
+        while at > 0 && usize::from(evals.points[at - 1]) > point_index {
+            evals.points[at] = evals.points[at - 1];
+            evals.evals[at] = evals.evals[at - 1];
+            at -= 1;
+        }
+        evals.points[at] = point_index as u8;
+        evals.evals[at] = query.get_eval();
+        evals.len += 1;
+    }
+    if commitments.is_empty() {
+        return Ok(None);
+    }
+    let mut masks: Vec<usize> = Vec::new();
+    for (_, mask, _) in commitments.iter_mut() {
+        *mask = match masks.iter().position(|m| m == mask) {
+            Some(set) => set,
+            None => {
+                masks.push(*mask);
+                masks.len() - 1
+            }
+        };
+    }
+    let point_sets = masks
+        .into_iter()
+        .map(|mask| {
+            points
+                .iter()
+                .enumerate()
+                .filter_map(|(i, p)| ((mask >> i) & 1 == 1).then_some(*p))
+                .collect()
+        })
+        .collect();
+    Ok(Some((commitments, point_sets)))
+}
+
 /// Verify a multi-opening proof.
 ///
 /// # Errors
@@ -124,13 +280,38 @@ where
     // polynomial terms linearly independent.
     let x_2: ChallengeX2<_> = transcript.squeeze_challenge_scalar();
 
-    let (commitment_map, point_sets) =
-        construct_intermediate_sets(queries).ok_or(Error::OpeningError)?;
+    #[allow(clippy::type_complexity)]
+    let (commitment_map, point_sets): (Vec<(_, usize, Evals<C::Scalar>)>, _) =
+        match construct_verifier_sets(queries.clone()) {
+            Ok(sets) => {
+                let (map, sets) = sets.ok_or(Error::OpeningError)?;
+                (
+                    map.into_iter()
+                        .map(|(c, set, evals)| (c, set, Evals::Inline(evals)))
+                        .collect(),
+                    sets,
+                )
+            }
+            Err(()) => {
+                let (map, sets) =
+                    construct_intermediate_sets(queries).ok_or(Error::OpeningError)?;
+                (
+                    map.into_iter()
+                        .map(|data| (data.commitment, data.set_index, Evals::Heap(data.evals)))
+                        .collect(),
+                    sets,
+                )
+            }
+        };
 
-    // Compress the commitments and expected evaluations at x together.
-    // using the challenge x_1
+    // The final commitment is
+    //   [x_4^n] Q' + sum_i [x_4^(n - 1 - i)] Q_i,  Q_i = sum_j [x_1^j] C_ij
+    // for the n point sets. Fold each commitment's two powers into one
+    // scalar here, instead of scaling every accumulated term again for
+    // each later point set; x_4 is sampled only after Q' is read, so the
+    // terms are collected first and scaled once x_4 is known.
     let mut q_commitments: Vec<_> = vec![
-        (params.empty_msm(), C::Scalar::ONE); // (accumulator, next x_1 power).
+        (Vec::new(), C::Scalar::ONE); // (commitments with x_1 powers, next x_1 power).
         point_sets.len()];
 
     // A vec of vecs of evals. The outer vec corresponds to the point set,
@@ -141,18 +322,9 @@ where
     }
 
     {
-        let mut accumulate = |set_idx: usize, new_commitment, evals: Vec<C::Scalar>| {
+        let mut accumulate = |set_idx: usize, new_commitment, evals: &[C::Scalar]| {
             let (q_commitment, x_1_power) = &mut q_commitments[set_idx];
-            match new_commitment {
-                CommitmentReference::Commitment(c) => {
-                    q_commitment.append_term(*x_1_power, *c);
-                }
-                CommitmentReference::MSM(msm) => {
-                    let mut msm = msm.clone();
-                    msm.scale(*x_1_power);
-                    q_commitment.add_msm(&msm);
-                }
-            }
+            q_commitment.push((new_commitment, *x_1_power));
             for (eval, set_eval) in evals.iter().zip(q_eval_sets[set_idx].iter_mut()) {
                 *set_eval += (*eval) * (*x_1_power);
             }
@@ -162,12 +334,8 @@ where
         // Each commitment corresponds to evaluations at a set of points.
         // For each set, we collapse each commitment's evals pointwise.
         // Run in order of increasing x_1 powers.
-        for commitment_data in commitment_map.into_iter().rev() {
-            accumulate(
-                commitment_data.set_index,  // set_idx,
-                commitment_data.commitment, // commitment,
-                commitment_data.evals,      // evals
-            );
+        for (commitment, set_index, evals) in commitment_map.iter().rev() {
+            accumulate(*set_index, *commitment, evals.as_slice());
         }
     }
 
@@ -194,15 +362,33 @@ where
     let x_4: ChallengeX4<_> = transcript.squeeze_challenge_scalar();
 
     // Compute the final commitment that has to be opened
-    msm.append_term(C::Scalar::ONE, q_prime_commitment);
-    let (msm, v) = q_commitments.into_iter().zip(u.iter()).fold(
-        (msm, msm_eval),
-        |(mut msm, msm_eval), ((q_commitment, _), q_eval)| {
-            msm.scale(*x_4);
-            msm.add_msm(&q_commitment);
-            (msm, msm_eval * &(*x_4) + q_eval)
-        },
-    );
+    let mut x_4_power = C::Scalar::ONE;
+    let mut v = msm_eval;
+    let mut x_4_powers = Vec::with_capacity(q_commitments.len());
+    for _ in u.iter() {
+        x_4_powers.push(x_4_power);
+        x_4_power *= *x_4;
+    }
+    for q_eval in u.iter() {
+        v = v * &(*x_4) + q_eval;
+    }
+    msm.scale(x_4_power);
+    msm.append_term(x_4_power, q_prime_commitment);
+    for ((q_commitment, _), x_4_power) in
+        q_commitments.into_iter().zip(x_4_powers.into_iter().rev())
+    {
+        for (commitment, x_1_power) in q_commitment {
+            let scalar = x_1_power * x_4_power;
+            match commitment {
+                CommitmentReference::Commitment(c) => msm.append_term(scalar, *c),
+                CommitmentReference::MSM(inner) => {
+                    let mut inner = inner.clone();
+                    inner.scale(scalar);
+                    msm.add_msm(&inner);
+                }
+            }
+        }
+    }
 
     // Verify the opening proof
     super::commitment::verify_proof(params, msm, transcript, *x_3, v)
@@ -330,5 +516,51 @@ mod tests {
             verify_proof(&params, &mut transcript, queries, params.empty_msm(),),
             Err(Error::OpeningError)
         );
+    }
+}
+
+#[cfg(test)]
+mod verifier_sets_tests {
+    use super::super::{VerifierQuery, construct_intermediate_sets};
+    use super::construct_verifier_sets;
+    use crate::pasta::{EqAffine, Fp};
+    use ff::Field;
+    use group::{Curve, Group};
+    use rand::{RngExt, SeedableRng};
+
+    #[test]
+    fn verifier_sets_match_generic_construction() {
+        let mut rng = rand::rngs::StdRng::seed_from_u64(1);
+        let commitments: Vec<EqAffine> = (0..12)
+            .map(|_| crate::pasta::Eq::random(&mut rng).to_affine())
+            .collect();
+        let points: Vec<Fp> = (0..5).map(|_| Fp::random(&mut rng)).collect();
+        for _ in 0..200 {
+            let mut queries = Vec::new();
+            for _ in 0..rng.random_range(1..40) {
+                let c = &commitments[rng.random_range(0..commitments.len())];
+                let p = points[rng.random_range(0..points.len())];
+                queries.push(VerifierQuery::<EqAffine>::new_commitment(
+                    c,
+                    p,
+                    Fp::random(&mut rng),
+                ));
+            }
+            let generic = construct_intermediate_sets(queries.clone());
+            let fast = construct_verifier_sets(queries.clone()).expect("shape fits inline");
+            match (generic, fast) {
+                (None, None) => {}
+                (Some((map, sets)), Some((fast_map, fast_sets))) => {
+                    assert_eq!(sets, fast_sets);
+                    assert_eq!(map.len(), fast_map.len());
+                    for (data, (commitment, set, evals)) in map.iter().zip(&fast_map) {
+                        assert!(data.commitment == *commitment);
+                        assert_eq!(data.set_index, *set);
+                        assert_eq!(&data.evals[..], &evals.evals[..evals.len]);
+                    }
+                }
+                (generic, fast) => panic!("{} vs {}", generic.is_some(), fast.is_some()),
+            }
+        }
     }
 }

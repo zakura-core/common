@@ -204,6 +204,8 @@ fn prepared_commitment_max_threads(k: u32) -> usize {
 }
 mod verifier;
 
+#[cfg(feature = "batch")]
+pub(crate) use msm::KnownTerms;
 pub use msm::MSM;
 pub use prover::create_proof;
 pub(super) use prover::create_proof_with_powers;

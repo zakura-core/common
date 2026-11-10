@@ -165,18 +165,22 @@ where
 
     // Also construct mapping from a unique point to a point_index. This defines
     // an ordering on the points.
-    let mut point_index_map = BTreeMap::new();
-    let mut points = Vec::new();
+    // Queries use a handful of distinct points, so a linear scan with
+    // field equality beats an ordered map, whose comparisons convert both
+    // operands out of Montgomery form.
+    let mut points: Vec<F> = Vec::new();
 
     // Iterate once over all queries, computing the ordering of the points and
     // collecting each commitment's evaluations.
     for query in queries {
         let point = query.get_point();
-        let point_idx = *point_index_map.entry(point).or_insert_with(|| {
-            let point_idx = points.len();
-            points.push(point);
-            point_idx
-        });
+        let point_idx = match points.iter().position(|p| *p == point) {
+            Some(point_idx) => point_idx,
+            None => {
+                points.push(point);
+                points.len() - 1
+            }
+        };
 
         let commitment = query.get_commitment();
         let commitment_idx = *commitment_indices.entry(commitment).or_insert_with(|| {
