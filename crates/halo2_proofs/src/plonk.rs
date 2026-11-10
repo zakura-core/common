@@ -748,58 +748,6 @@ impl<F: PrimeField> VerifierExpressions<F> {
         values
     }
 
-    /// Evaluates every circuit's gate roots, interpreting two circuits per
-    /// pass so each operation is decoded once for both and their field
-    /// multiplications are independent.
-    fn evaluate_all(
-        &self,
-        common: &[F],
-        fixed: &[F],
-        advice: &[&[F]],
-        instance: &[&[F]],
-    ) -> Vec<Vec<F>> {
-        assert_eq!(advice.len(), instance.len());
-        let mut out = Vec::with_capacity(advice.len());
-        let mut pair: Vec<[F; 2]> = Vec::new();
-        let mut i = 0;
-        while i + 1 < advice.len() {
-            pair.clear();
-            pair.extend(common.iter().map(|v| [*v, *v]));
-            let (a0, a1, i0, i1) = (advice[i], advice[i + 1], instance[i], instance[i + 1]);
-            for &index in &self.per_proof {
-                let value = match self.operations[index] {
-                    VerifierExpressionOp::Constant(c) => [self.constants[c]; 2],
-                    VerifierExpressionOp::Fixed(f) => [fixed[f]; 2],
-                    VerifierExpressionOp::Advice(a) => [a0[a], a1[a]],
-                    VerifierExpressionOp::Instance(q) => [i0[q], i1[q]],
-                    VerifierExpressionOp::Negated(a) => [-pair[a][0], -pair[a][1]],
-                    VerifierExpressionOp::Sum(a, b) => {
-                        [pair[a][0] + pair[b][0], pair[a][1] + pair[b][1]]
-                    }
-                    VerifierExpressionOp::Product(a, b) => {
-                        [pair[a][0] * pair[b][0], pair[a][1] * pair[b][1]]
-                    }
-                    VerifierExpressionOp::Scaled(a, c) => {
-                        let c = self.constants[c];
-                        [pair[a][0] * c, pair[a][1] * c]
-                    }
-                    VerifierExpressionOp::Selector => {
-                        panic!("virtual selectors are removed during optimization")
-                    }
-                };
-                pair[index] = value;
-            }
-            out.push(self.roots.iter().map(|&root| pair[root][0]).collect());
-            out.push(self.roots.iter().map(|&root| pair[root][1]).collect());
-            i += 2;
-        }
-        if i < advice.len() {
-            let mut values = common.to_vec();
-            out.push(self.evaluate(&mut values, fixed, advice[i], instance[i]));
-        }
-        out
-    }
-
     fn evaluate(&self, values: &mut [F], fixed: &[F], advice: &[F], instance: &[F]) -> Vec<F> {
         assert_eq!(values.len(), self.operations.len());
         for &index in &self.per_proof {
@@ -873,37 +821,6 @@ mod verifier_expression_tests {
                     .collect::<Vec<_>>();
                 assert_eq!(
                     plan.evaluate(&mut scratch, &fixed_evals, &advice_evals, &instance_evals),
-                    expected,
-                );
-            }
-
-            // Paired evaluation matches one circuit at a time, for even and
-            // odd circuit counts.
-            let advice = (0_u64..5)
-                .map(|seed| [F::from(seed + 5), F::from(seed + 3).square()])
-                .collect::<Vec<_>>();
-            let instance = (0_u64..5)
-                .map(|seed| [F::ONE, F::ZERO, -F::from(seed + 11).square()])
-                .collect::<Vec<_>>();
-            let common = plan.common_values(&fixed_evals);
-            for circuits in 0..=advice.len() {
-                let advice = advice[..circuits]
-                    .iter()
-                    .map(|a| &a[..])
-                    .collect::<Vec<_>>();
-                let instance = instance[..circuits]
-                    .iter()
-                    .map(|i| &i[..])
-                    .collect::<Vec<_>>();
-                let expected = advice
-                    .iter()
-                    .zip(&instance)
-                    .map(|(advice, instance)| {
-                        plan.evaluate(&mut common.clone(), &fixed_evals, advice, instance)
-                    })
-                    .collect::<Vec<_>>();
-                assert_eq!(
-                    plan.evaluate_all(&common, &fixed_evals, &advice, &instance),
                     expected,
                 );
             }
