@@ -1132,23 +1132,17 @@ fn create_proof_with_synthesis<
         }
     }
 
-    // Hash verification key into transcript
-    pk.vk.hash_into(transcript)?;
-
     if cancelled() {
         return Err(Error::Cancelled);
     }
+    // Hash verification key into transcript
+    pk.vk.hash_into(transcript)?;
+
     let domain = &pk.vk.domain;
 
     // Selector optimizations cannot be applied here; use the ConstraintSystem
     // from the verification key.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let meta = &pk.vk.cs;
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let max_instance_len = params.n as usize - (meta.blinding_factors() + 1);
 
     if cancelled() {
@@ -1176,9 +1170,6 @@ fn create_proof_with_synthesis<
         .collect::<Vec<_>>();
 
     // Preserve circuit and column order while collecting the prepared values.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let mut prepared_instance_values = Vec::with_capacity(instance_values.len());
     for instance_values in instance_values {
         prepared_instance_values.push(instance_values?);
@@ -1187,19 +1178,10 @@ fn create_proof_with_synthesis<
     #[cfg(feature = "unstable-prover-fingerprint")]
     super::prover_fingerprint::record_setup(params, pk, instances);
 
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
     // Use explicit denominator relationships for every non-empty proof. The
     // smaller inversion walk now outweighs tracking even for one circuit.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let reuse_related_denominators = !instances.is_empty();
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let mut witnesses = instances
         .iter()
         .map(|instances| WitnessCollection {
@@ -1231,9 +1213,6 @@ fn create_proof_with_synthesis<
         pub advice_blinds: Vec<Blind<C::Scalar>>,
     }
 
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let prepare_instance_polynomials = || {
         prepared_instance_values
             .into_par_iter()
@@ -1278,17 +1257,11 @@ fn create_proof_with_synthesis<
             })
             .collect::<Vec<_>>()
     };
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let prepare_instance = || {
         let instance = prepare_instance_polynomials();
         let commitments = normalize_prover_instance_commitments(params, instances);
         (commitments, instance)
     };
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let absorb_instance_commitments =
         |instance_commitments: Vec<Vec<C>>, transcript: &mut T| -> Result<(), Error> {
             for commitments in instance_commitments {
@@ -1298,9 +1271,6 @@ fn create_proof_with_synthesis<
             }
             Ok(())
         };
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let prepare_advice = |witnesses: Vec<WitnessCollection<'_, C::Scalar>>, rng: &mut R| {
         // Rational advice evaluation is independent across circuits. Keep
         // every RNG draw below in circuit order and after successful
@@ -1402,9 +1372,6 @@ fn create_proof_with_synthesis<
         )
     };
 
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     #[cfg(feature = "multicore")]
     let (instance, (prepared_advice, lookup_table_plan)) =
         if crate::multicore::current_num_threads() > 1 {
@@ -1431,9 +1398,6 @@ fn create_proof_with_synthesis<
             (instance, prepare_advice(witnesses, &mut rng))
         };
 
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     #[cfg(not(feature = "multicore"))]
     let (instance, (prepared_advice, lookup_table_plan)) = {
         let (instance_commitments, instance) = prepare_instance();
@@ -1454,15 +1418,9 @@ fn create_proof_with_synthesis<
     }
 
     // Create polynomial evaluator context for values.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let mut value_evaluator = poly::new_evaluator(|| {});
 
     // Register fixed values with the polynomial evaluator.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let fixed_values: Vec<_> = pk
         .fixed_values
         .iter()
@@ -1470,9 +1428,6 @@ fn create_proof_with_synthesis<
         .collect();
 
     // Register advice values with the polynomial evaluator.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let advice_values: Vec<_> = advice
         .iter()
         .map(|advice| {
@@ -1485,9 +1440,6 @@ fn create_proof_with_synthesis<
         .collect();
 
     // Register instance values with the polynomial evaluator.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let instance_values: Vec<_> = instance
         .iter()
         .map(|instance| {
@@ -1500,15 +1452,9 @@ fn create_proof_with_synthesis<
         .collect();
 
     // Create polynomial evaluator context for cosets.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let mut coset_evaluator = poly::new_evaluator(evaluator_schedule::quotient_evaluator_brand);
 
     // Register fixed cosets with the polynomial evaluator.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let fixed_cosets: Vec<_> = pk
         .fixed_cosets
         .iter()
@@ -1547,9 +1493,6 @@ fn create_proof_with_synthesis<
     }
 
     // Register advice cosets with the polynomial evaluator.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let advice_cosets: Vec<_> = advice
         .iter()
         .enumerate()
@@ -1573,9 +1516,6 @@ fn create_proof_with_synthesis<
         .collect();
 
     // Register instance cosets with the polynomial evaluator.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let instance_cosets: Vec<_> = instance
         .iter()
         .enumerate()
@@ -1599,9 +1539,6 @@ fn create_proof_with_synthesis<
         .collect();
 
     // Register permutation cosets with the polynomial evaluator.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let permutation_cosets: Vec<_> = pk
         .permutation
         .cosets
@@ -1614,50 +1551,23 @@ fn create_proof_with_synthesis<
         .collect();
 
     // Register boundary polynomials used in the lookup and permutation arguments.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let l0 = coset_evaluator.register_poly_ref_with_tag(&pk.l0, QuotientPoly::L0.into());
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let l_blind =
         coset_evaluator.register_poly_ref_with_tag(&pk.l_blind, QuotientPoly::LBlind.into());
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let l_last = coset_evaluator.register_poly_ref_with_tag(&pk.l_last, QuotientPoly::LLast.into());
 
     // Sample theta challenge for keeping lookup columns linearly independent
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
 
     // A plan candidate lets lookup preparation omit its symbolic quotient
     // ASTs. Evaluator-shape validation remains deferred until every
     // polynomial has been registered; a rejected candidate reconstructs them
     // on the ordinary compilation path below.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let circuit_count = instance_values.len();
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let compiled_plan = pk.quotient_plans.get(circuit_count);
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let build_lookup_quotient_asts = compiled_plan.is_none();
 
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let lookup_count = pk.vk.cs.lookups.len();
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let mut lookup_tasks = Vec::new();
     // Draw all blinding values in circuit-major, lookup-major order before
     // preparing the independent lookup arguments in parallel.
@@ -1689,13 +1599,7 @@ fn create_proof_with_synthesis<
         build_lookup_quotient_asts,
     )?;
 
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let mut prepared_lookups = prepared_lookups.into_iter();
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let lookups: Vec<Vec<lookup::prover::Permuted<C, _>>> = (0..circuit_count)
         .map(|circuit_index| {
             (0..lookup_count)
@@ -1716,36 +1620,18 @@ fn create_proof_with_synthesis<
     debug_assert!(prepared_lookups.next().is_none());
 
     // Sample beta challenge
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
 
     // Sample gamma challenge
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
 
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let permutation_workers = crate::multicore::current_num_threads();
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let permutation_set_count = pk.vk.cs.permutation.set_count(pk.vk.cs_degree);
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let prepare_permutation_circuits = prepare_permutation_circuits_in_parallel::<C>(
         instance.len(),
         permutation_workers,
         params.n as usize,
     );
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let prepare_nested_permutation_sets = prepare_nested_permutation_sets_in_parallel::<C>(
         instance.len(),
         permutation_set_count,
@@ -1840,9 +1726,6 @@ fn create_proof_with_synthesis<
     };
 
     debug_assert_eq!(lookups.len(), circuit_count);
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let mut lookup_product_tasks = Vec::with_capacity(circuit_count * lookup_count);
     // Draw all blinding values in circuit-major, lookup-major order before
     // preparing the independent lookup products in parallel.
@@ -1862,13 +1745,7 @@ fn create_proof_with_synthesis<
         .map(|(lookup, blinding)| lookup.prepare_product(pk, params, beta, gamma, blinding))
         .collect::<Vec<_>>();
 
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let mut prepared_lookup_products = prepared_lookup_products.into_iter();
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let lookups: Vec<Vec<lookup::prover::Committed<C, _>>> = (0..circuit_count)
         .map(|circuit_index| {
             (0..lookup_count)
@@ -1896,21 +1773,12 @@ fn create_proof_with_synthesis<
     let vanishing = vanishing::Argument::commit_random_polynomial(params, &mut rng, transcript)?;
 
     // Obtain challenge for keeping all separate gates linearly independent
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
 
     // Validate a keygen-prepared plan before using it to bypass every
     // challenge-bound constraint AST allocation. A mismatch takes the full
     // construction path and can replace the retained plan safely.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let compiled_plan = compiled_plan.filter(|plan| coset_evaluator.accepts_compiled_plan(plan));
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let (permutations, lookups, expressions) = if compiled_plan.is_some() {
         let permutations = permutations
             .into_iter()
@@ -2024,16 +1892,10 @@ fn create_proof_with_synthesis<
         pk.quotient_plans.retain(circuit_count, plan);
     }
 
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
     // The quotient fold and x^n depend on x but not on these evaluation tables
     // or query descriptors. Prepare both concurrently, then retain the
     // protocol's original transcript-write order below.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let ((polynomial_evaluator, queries, initial_evaluation_count), (vanishing, random_eval)) =
         crate::multicore::join(
             || {
@@ -2124,14 +1986,8 @@ fn create_proof_with_synthesis<
     // All evaluations below depend only on x. Evaluate them as one batch so
     // that small argument-local query sets share the same worker wave, then
     // preserve the protocol's transcript order while consuming the results.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let evaluations = polynomial_evaluator.evaluate(&queries);
     drop(queries);
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let mut evaluations = evaluations.into_iter();
     for _ in 0..initial_evaluation_count {
         let evaluation = evaluations
@@ -2146,18 +2002,12 @@ fn create_proof_with_synthesis<
     pk.permutation.evaluate(&mut evaluations, transcript)?;
 
     // Evaluate the permutations, if any, at omega^i x.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let permutations: Vec<permutation::prover::Evaluated<C>> = permutations
         .into_iter()
         .map(|permutation| -> Result<_, _> { permutation.evaluate(&mut evaluations, transcript) })
         .collect::<Result<Vec<_>, _>>()?;
 
     // Evaluate the lookups, if any, at omega^i x.
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let lookups: Vec<Vec<lookup::prover::Evaluated<C>>> = lookups
         .into_iter()
         .map(|lookups| -> Result<Vec<_>, _> {
@@ -2172,9 +2022,6 @@ fn create_proof_with_synthesis<
         "one result is consumed for every batched polynomial evaluation query",
     );
 
-    if cancelled() {
-        return Err(Error::Cancelled);
-    }
     let instances = instance
         .iter()
         .zip(advice.iter())
