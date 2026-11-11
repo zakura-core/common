@@ -43,9 +43,10 @@
 //!
 //! The verifier retains scratch in bounded idle pools instead: equation
 //! scratch and final-MSM workspaces return after success and reported errors,
-//! within the slot counts and per-entry capacity ceilings in
-//! [`tuning`](crate::tuning). The verifier module's scratch section describes
-//! the lease protocol; `Discard` behavior corresponds to zero slots.
+//! within the per-entry capacity ceilings in [`tuning`](crate::tuning) and the
+//! slot counts it derives from the pool's budgets. The verifier module's
+//! scratch section describes the lease protocol; `Discard` behavior
+//! corresponds to zero slots.
 //!
 //! Both runtime caches recover a poisoned idle mutex with `into_inner`. This
 //! permits reuse of the slots; it does not turn a panicking computation into

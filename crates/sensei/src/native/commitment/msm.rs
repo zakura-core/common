@@ -68,6 +68,9 @@ use udon::{
 
 const FRONTIER: usize = 32;
 
+#[cfg(all(test, feature = "verifier"))]
+use crate::native::task_stats::TaskStats;
+
 #[cfg(all(test, feature = "prover"))]
 mod tests;
 
@@ -557,11 +560,17 @@ pub(crate) struct Coordinator<'a, 'i, 'b, C: PastaCurve> {
     free_len: usize,
     cursor: usize,
     error: Option<CurveError>,
+    /// Per input group, the task-class probes `Batch::execute_probed` records
+    /// into: preparation, window, and reduction tasks.
+    #[cfg(all(test, feature = "verifier"))]
+    probe: Option<&'b [[TaskStats; 3]]>,
 }
 pub(crate) struct MsmTask<'a, 'i, 'b, C: PastaCurve> {
     index: usize,
     request: Request<'a>,
     task: Task<'a, MsmKernel<'i, C>, SourcedLease<'b, C>>,
+    #[cfg(all(test, feature = "verifier"))]
+    probe: Option<&'b TaskStats>,
 }
 #[cfg(all(test, feature = "prover"))]
 impl<C: PastaCurve> MsmTask<'_, '_, '_, C> {
@@ -571,7 +580,13 @@ impl<C: PastaCurve> MsmTask<'_, '_, '_, C> {
 }
 impl<C: PastaCurve> Job for MsmTask<'_, '_, '_, C> {
     fn execute(&mut self) {
+        #[cfg(all(test, feature = "verifier"))]
+        let started = self.probe.and_then(TaskStats::start);
         self.task.execute().expect("fresh task");
+        #[cfg(all(test, feature = "verifier"))]
+        if let Some(probe) = self.probe {
+            probe.record(started);
+        }
     }
 }
 impl<'a, 'i, 'b, C: PastaCurve> Scheduler for Coordinator<'a, 'i, 'b, C> {
@@ -656,10 +671,26 @@ impl<'a, 'i, 'b, C: PastaCurve> Scheduler for Coordinator<'a, 'i, 'b, C> {
                 .expect("current request")
                 .expect("complete lease");
             self.cursor = (index + 1) % self.runs.len();
+            // Classify by the same request fields the lease logic above uses:
+            // preparation writes retained scalars/digits, windows publish a
+            // partial output, and the remaining tasks reduce.
+            #[cfg(all(test, feature = "verifier"))]
+            let probe = self.probe.map(|probe| {
+                let kind = if request.scratch.scalars() != 0 || request.scratch.digits() != 0 {
+                    0
+                } else if request.output_slot.is_some() {
+                    1
+                } else {
+                    2
+                };
+                &probe[self.bindings[index].2][kind]
+            });
             return Some(MsmTask {
                 index,
                 request,
                 task,
+                #[cfg(all(test, feature = "verifier"))]
+                probe,
             });
         }
         None
@@ -718,6 +749,39 @@ impl<C: PastaCurve> Batch<'_, '_, C> {
         )
     }
 
+    /// `execute`, recording each task's duration into `probe`: one probe set
+    /// per input group, indexed by task class (preparation, window,
+    /// reduction). An empty `probe` records nothing.
+    #[cfg(all(test, feature = "verifier"))]
+    pub(crate) fn execute_probed<E: Executor>(
+        &mut self,
+        output: &mut [ProjectivePoint<C>],
+        executor: &E,
+        probe: &[[TaskStats; 3]],
+    ) -> Result<(), CurveError> {
+        let probe = (!probe.is_empty()).then_some(probe);
+        if let Some(probe) = probe {
+            assert_eq!(probe.len(), self.groups.len(), "one probe set per group");
+        }
+        let budget = TaskBudget::new(self.work.len()).unwrap();
+        self.run(output, executor, budget, &mut (), probe)
+    }
+
+    /// The prepared work bundle count and, per input group, its partition
+    /// count, output slots per partition, and grain.
+    #[cfg(all(test, feature = "verifier"))]
+    pub(crate) fn shape(&self) -> (usize, Vec<(usize, usize, usize)>) {
+        let groups = self
+            .groups
+            .iter()
+            .map(|group| {
+                let plan = &self.plans[group.start];
+                (group.len(), plan.output_slots(), plan.grain())
+            })
+            .collect();
+        (self.work.len(), groups)
+    }
+
     pub(crate) fn execute_with<E: Executor, S: Scheduler>(
         &mut self,
         output: &mut [ProjectivePoint<C>],
@@ -725,10 +789,32 @@ impl<C: PastaCurve> Batch<'_, '_, C> {
         budget: TaskBudget,
         sides: &mut S,
     ) -> Result<(), CurveError> {
+        self.run(
+            output,
+            executor,
+            budget,
+            sides,
+            #[cfg(all(test, feature = "verifier"))]
+            None,
+        )
+    }
+
+    fn run<E: Executor, S: Scheduler>(
+        &mut self,
+        output: &mut [ProjectivePoint<C>],
+        executor: &E,
+        budget: TaskBudget,
+        sides: &mut S,
+        #[cfg(all(test, feature = "verifier"))] probe: Option<&[[TaskStats; 3]]>,
+    ) -> Result<(), CurveError> {
         assert_eq!(output.len(), self.groups.len(), "commitment output length");
         let workers = self.work.len();
         let groups = self.groups;
         let mut coordinator = self.coordinator();
+        #[cfg(all(test, feature = "verifier"))]
+        {
+            coordinator.probe = probe;
+        }
         run::drive(
             &mut run::Pair::new(&mut coordinator, sides),
             budget,
@@ -794,6 +880,8 @@ impl<'a, 'i, C: PastaCurve> Batch<'a, 'i, C> {
             },
             cursor: 0,
             error: None,
+            #[cfg(all(test, feature = "verifier"))]
+            probe: None,
         }
     }
 }

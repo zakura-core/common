@@ -337,6 +337,45 @@ pub struct VerificationRequest<'a> {
     pub(crate) statements: &'a [PublicStatement],
     pub(crate) proof: &'a [u8],
 }
+/// What one verification batch shape requests from the shared worker pool
+/// and retains in the verifier's idle scratch pools, as provisioned by
+/// [`crate::warm_up_verifier_scratch`].
+///
+/// Task counts are planning allowances within the pool, not thread
+/// reservations: concurrent batches share the pool's workers by work
+/// stealing. Admission control can bound in-flight batches by
+/// `pooled_batches` to keep every batch on retained scratch, and by the
+/// pool's [`crate::worker_budget`] relative to `fold_tasks` to keep the
+/// workers busy without oversubscribing them.
+#[cfg(feature = "verifier")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub struct VerificationPlan {
+    /// Concurrent proof-folding tasks the shape cuts: at most the pool's
+    /// fold budget and the proof count. One equation entry is leased per task.
+    pub fold_tasks: usize,
+    /// Final-equation MSM tasks the shape requests, at most the pool's MSM
+    /// budget.
+    pub msm_tasks: usize,
+    /// Retained capacity in bytes of the final-MSM workspace provisioned for
+    /// the shape. A concurrent call beyond `pooled_batches` allocates about
+    /// this much and discards it afterwards.
+    pub workspace_bytes: usize,
+    /// Total retained capacity in bytes of the `fold_tasks` equation entries
+    /// provisioned for the shape.
+    pub equation_bytes: usize,
+    /// Batches the idle pools serve concurrently without allocating scratch:
+    /// the sustainable concurrency for admission control.
+    pub pooled_batches: usize,
+    /// Whether every provisioned entry fits its retention ceiling and was
+    /// kept. `false` means this shape reallocates its scratch on every call.
+    pub retained: bool,
+    /// Upper bound on the idle scratch the pools retain in total, in bytes
+    /// (slot counts times per-entry ceilings, both pools) for this worker
+    /// budget.
+    pub max_idle_bytes: usize,
+}
+
 #[cfg(feature = "verifier")]
 impl<'a> VerificationRequest<'a> {
     /// Validates the request's shape and public points without copying it.

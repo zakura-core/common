@@ -19,9 +19,10 @@
 //! proving, and never initializes the prover's circuit state. The first nonempty
 //! `verify_proofs` call prepares the verifier on demand; `warm_up_verifier`
 //! can do this eagerly, and `warm_up_verifier_scratch` can additionally
-//! provision verification scratch for an expected batch shape. Warming either
-//! role prepares the shared SRS once; warming
-//! the other then prepares only its remaining state. `warm_up` warms both roles.
+//! provision verification scratch for an expected batch shape and report its
+//! `VerificationPlan` for admission control. Warming either role prepares the
+//! shared SRS once; warming the other then prepares only its remaining state.
+//! `warm_up` warms both roles.
 //! Each verification request selects its `CircuitVersion`; batches may mix
 //! versions and share one final verification equation. Keys are embedded.
 //!
@@ -189,10 +190,10 @@ pub use error::Error;
 pub use error::WorkersConfigError;
 pub use primitives::{Fp, Fq, Fr, NonIdentityPallasPoint, PallasPoint, SpendValidatingKey};
 pub use rng::{RandomSource, RandomnessError};
-#[cfg(feature = "verifier")]
-pub use types::VerificationRequest;
 #[cfg(any(feature = "prover", feature = "verifier"))]
 pub use types::{CircuitVersion, PublicStatement};
+#[cfg(feature = "verifier")]
+pub use types::{VerificationPlan, VerificationRequest};
 
 #[cfg(feature = "prover")]
 pub use types::{Action, PrivateWitness, ProvingRequest};
@@ -269,8 +270,10 @@ pub fn configure_workers(workers: usize) -> Result<(), WorkersConfigError> {
 ///
 /// After this returns, [`configure_workers`] reports
 /// [`WorkersConfigError::AlreadyInitialized`]. Admission control can combine
-/// this budget with per-batch workload when bounding concurrent verification.
-/// Without the `multicore` feature this is always one.
+/// this budget with a batch shape's `VerificationPlan` (from
+/// `warm_up_verifier_scratch`, with the `verifier` feature) when bounding
+/// concurrent verification. Without the `multicore` feature this is always
+/// one.
 #[cfg(any(feature = "prover", feature = "verifier"))]
 pub fn worker_budget() -> usize {
     native::executor::worker_budget()
@@ -317,7 +320,8 @@ pub fn warm_up_verifier() {
 
 /// Optionally provisions bounded verification scratch for an expected batch of
 /// `proofs` proofs totalling `actions` Actions, on top of [`warm_up_verifier`]
-/// (which it performs first and which allocates no batch scratch itself).
+/// (which it performs first and which allocates no batch scratch itself), and
+/// reports the shape's [`VerificationPlan`].
 ///
 /// The first large batch otherwise pays for growing per-chunk equation scratch
 /// and the final-MSM workspace. This reserves those capacities — assuming the
@@ -326,11 +330,20 @@ pub fn warm_up_verifier() {
 /// near its steady-state latency. Provisioning is capacity-only: a real batch
 /// still plans its own work and grows any residual shortfall, and a shape
 /// larger than the pools' per-entry retention ceilings is provisioned but not
-/// retained. Calling again with a larger shape tops the pools up; `proofs` of
-/// zero only warms the verifier. Consumes no randomness.
+/// retained (the plan reports `retained: false`). Calling again with a larger
+/// shape tops the pools up; `proofs` of zero only warms the verifier and
+/// reports a plan with zero tasks and bytes. Consumes no randomness.
+///
+/// The plan is computed under the pool's final worker budget, so call
+/// [`configure_workers`] first. For admission control, bound in-flight
+/// batches by `pooled_batches`: every batch beyond that allocates and
+/// discards `workspace_bytes` of scratch per call, and the pools never retain
+/// more than `max_idle_bytes`. On a 32-worker pool a node expecting 64-proof
+/// batches would therefore admit `min(plan.pooled_batches, its own pool size)`
+/// batches at once.
 #[cfg(feature = "verifier")]
-pub fn warm_up_verifier_scratch(proofs: usize, actions: usize) {
-    native::verifier::warm_up_verifier_scratch(proofs, actions);
+pub fn warm_up_verifier_scratch(proofs: usize, actions: usize) -> VerificationPlan {
+    native::verifier::warm_up_verifier_scratch(proofs, actions)
 }
 
 /// Verifies a batch of Action proofs for their selected circuit versions and

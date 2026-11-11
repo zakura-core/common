@@ -174,6 +174,19 @@ pub(crate) fn benchmark_resources() {
     );
 }
 
+/// The proof pipeline's task budget: the pool capped by
+/// [`tuning::PROVING_TASK_CAP`] (and, in benchmarks, `SENSEI_BENCH_PROVING_CAP`).
+fn proving_budget(executor: &PoolExecutor) -> udon::exec::TaskBudget {
+    let budget = executor.budget_capped(tuning::PROVING_TASK_CAP);
+    #[cfg(test)]
+    let budget = std::env::var("SENSEI_BENCH_PROVING_CAP")
+        .ok()
+        .map(|value| value.parse::<usize>().expect("positive task cap"))
+        .and_then(|cap| udon::exec::TaskBudget::new(cap.clamp(1, budget.get())))
+        .unwrap_or(budget);
+    budget
+}
+
 pub(crate) fn prove(
     request: &ProvingRequest,
     randomness: &mut dyn RandomSource,
@@ -190,10 +203,7 @@ pub(crate) fn prove(
                 request,
                 randomness,
                 workspace,
-                Execution::new(
-                    context,
-                    runtime.executor.budget_capped(tuning::PROVING_TASK_CAP),
-                ),
+                Execution::new(context, proving_budget(runtime.executor)),
                 #[cfg(test)]
                 timing,
             )

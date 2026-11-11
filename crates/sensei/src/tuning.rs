@@ -61,19 +61,44 @@ pub(crate) const WORKSPACE: WorkspaceRetention = WorkspaceRetention::Discard;
 
 // Per-operation task budgets within the configured worker pool. Each
 // operation requests at most its cap of concurrent tasks; the pool's worker
-// count bounds them all, and `usize::MAX` leaves an operation at the full
-// pool budget. The minimum-work floors below still apply within a cap, so a
-// small request never fans out merely because workers are available.
-// A 16-core M-series sweep (2026-11-10) found no cap worth defaulting:
-// proving and both verification phases were flat or improving through 16
-// workers. Platforms whose optima differ (for example SMT machines) can cap
-// an operation here without resizing the pool.
+// count bounds them all. The minimum-work floors below still apply within a
+// cap, so a small request never fans out merely because workers are
+// available. A cap bounds one call's tasks, not the pool's threads:
+// concurrent calls still overlap across the whole pool.
+//
+// Neither a 16-core M-series sweep nor a 16-core/32-thread Intel sweep (both
+// 2026-11-10) found a cap worth defaulting. Capping folds, the final MSM, or
+// proving at the Intel part's 16 physical cores inside its 32-worker pool was
+// 20-60% slower than the full pool: the capped tasks land on SMT siblings
+// while the pool's idle workers spin, so a smaller pool (`configure_workers`)
+// is the only effective SMT lever, and work-shaped limits such as
+// VERIFY_MSM_SLICE_POINTS are what let 32 workers match 16.
+/// A per-operation task cap, resolved by the executor against its pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TaskCap {
+    /// The full pool budget.
+    Pool,
+    /// An absolute task count; zero is treated as one.
+    Fixed(usize),
+}
 /// Task cap for the proof pipeline. Preparation and warmup keep the full pool.
-pub(crate) const PROVING_TASK_CAP: usize = usize::MAX;
+pub(crate) const PROVING_TASK_CAP: TaskCap = TaskCap::Pool;
 /// Task cap for verification proof folding.
-pub(crate) const VERIFY_FOLD_TASK_CAP: usize = usize::MAX;
+pub(crate) const VERIFY_FOLD_TASK_CAP: TaskCap = TaskCap::Pool;
 /// Task cap for the final verification equation's MSM.
-pub(crate) const VERIFY_MSM_TASK_CAP: usize = usize::MAX;
+pub(crate) const VERIFY_MSM_TASK_CAP: TaskCap = TaskCap::Pool;
+/// Final-equation transcript points per MSM input slice. The batch's
+/// transcript commitments enter the final MSM as independent slices of at
+/// least this many points (never more slices than the MSM task budget), so
+/// their window tasks shorten with the batch instead of one input's window
+/// count bounding the whole MSM's parallelism. Intel anchors (i9-7960X,
+/// 64 two-Action proofs): as one Booth(11) input, the 4,928 points expose
+/// twelve window tasks of about 2.6 ms, the MSM's critical path; four slices
+/// cut the final MSM from 3.4 to 3.0 ms at 16 workers and from 4.5 to 2.8 ms
+/// at 32, and shrink the retained workspace from 25.8 MiB to 6.6 MiB (10.5
+/// MiB at 32 workers). Slicing a 16-proof batch's 1,232 points costs 4-9%,
+/// so the floor sits above it.
+pub(crate) const VERIFY_MSM_SLICE_POINTS: usize = 1024;
 /// Minimum Actions of proof-folding work per verification chunk before an
 /// additional chunk is cut; a batch below one floor folds on the calling
 /// thread without entering the pool's scheduler. Folding one two-Action proof
@@ -83,27 +108,52 @@ pub(crate) const VERIFY_MSM_TASK_CAP: usize = usize::MAX;
 pub(crate) const VERIFY_FOLD_MIN_ACTIONS: usize = 2;
 /// Minimum final-equation MSM terms per requested task. A small batch asks
 /// for fewer workers instead of slicing its terms thinner; a one-proof batch
-/// carries about 2,200 terms, so this floor requests roughly eight tasks for
-/// it (the measured small-batch optimum; pending revalidation on x86_64).
-pub(crate) const VERIFY_MSM_MIN_TERMS: usize = 256;
+/// carries about 2,200 terms, so this floor requests about sixteen tasks for
+/// it on pools that large. Intel anchors (i9-7960X): sixteen tasks verify a
+/// one-proof batch in 1.73 ms at 16 workers against 2.15 ms with eight
+/// (the previous floor of 256 terms, the M-series small-batch optimum at
+/// the time; pending revalidation there) and 3.1 ms with four; a 16-proof
+/// batch gains 11% at 16 and 32 workers, and an 8-worker pool is unchanged.
+pub(crate) const VERIFY_MSM_MIN_TERMS: usize = 128;
 
 // Bounded idle verification scratch, retained across calls. Each verification
 // call leases per-chunk equation scratch and one final-MSM workspace, and
-// returns them — on success and on error — to process-wide pools holding at
-// most SLOTS entries each. A returned item whose retained capacity exceeds
-// its byte ceiling is dropped instead, so retained memory never exceeds
-// SLOTS × MAX_BYTES per pool. Unwinding drops the active scratch. Concurrent
-// calls beyond the slot counts allocate fresh scratch and discard it.
-// Measured anchors (two-Action proofs): a 64-proof batch retains sixteen
-// chunk equations of ≤0.7 MiB and a 25.8 MiB workspace; a 256-proof batch's
-// workspace is 41.4 MiB, and only its merged combined equation exceeds the
-// equation ceiling.
-/// Idle equation-scratch entries; sized for one pool's worth of fold chunks.
-pub(crate) const VERIFIER_EQUATION_SLOTS: usize = 16;
+// returns them — on success and on error — to process-wide pools whose slot
+// counts the functions below derive from the pool's budgets. A returned item
+// whose retained capacity exceeds its byte ceiling is dropped instead, so
+// retained memory never exceeds slots × MAX_BYTES per pool (reported as
+// `VerificationPlan::max_idle_bytes`). Unwinding drops the active scratch.
+// Concurrent calls beyond the slot counts allocate fresh scratch and discard
+// it, so a node's admission bound should not exceed the workspace slots.
+// Measured anchors (two-Action proofs, sliced final MSM): a 64-proof batch
+// retains sixteen chunk equations of ≤0.7 MiB, a 1.1 MiB combined equation,
+// and a 6.6 MiB workspace at 16 workers (32 chunks and 10.5 MiB at 32
+// workers); only a batch of several hundred proofs exceeds the equation
+// ceiling with its combined equation.
+/// Idle equation-scratch entries: two batches' worth of fold chunks at the
+/// resolved fold budget, within this range, so one batch's chunks always
+/// return to the pool and an overlapping second batch usually does.
+pub(crate) const VERIFIER_EQUATION_SLOTS: core::ops::RangeInclusive<usize> = 16..=64;
+pub(crate) fn verifier_equation_slots(fold_budget: usize) -> usize {
+    (2 * fold_budget).clamp(
+        *VERIFIER_EQUATION_SLOTS.start(),
+        *VERIFIER_EQUATION_SLOTS.end(),
+    )
+}
 /// Per-entry retained-capacity ceiling for pooled equation scratch.
 pub(crate) const VERIFIER_EQUATION_MAX_BYTES: usize = 4 << 20;
-/// Idle final-MSM workspaces; one per concurrently verifying batch.
-pub(crate) const VERIFIER_WORKSPACE_SLOTS: usize = 4;
+/// Idle final-MSM workspaces: the concurrently verifying batches the pools
+/// serve without allocating, one slot per `VERIFIER_WORKSPACE_WORKERS_PER_SLOT`
+/// workers within this range. `warm_up_verifier_scratch` reports the result
+/// as the sustainable concurrency for admission control.
+pub(crate) const VERIFIER_WORKSPACE_SLOTS: core::ops::RangeInclusive<usize> = 4..=8;
+pub(crate) const VERIFIER_WORKSPACE_WORKERS_PER_SLOT: usize = 4;
+pub(crate) fn verifier_workspace_slots(workers: usize) -> usize {
+    (workers / VERIFIER_WORKSPACE_WORKERS_PER_SLOT).clamp(
+        *VERIFIER_WORKSPACE_SLOTS.start(),
+        *VERIFIER_WORKSPACE_SLOTS.end(),
+    )
+}
 /// Per-entry retained-capacity ceiling for pooled final-MSM workspaces.
 pub(crate) const VERIFIER_WORKSPACE_MAX_BYTES: usize = 48 << 20;
 

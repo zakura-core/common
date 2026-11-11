@@ -19,7 +19,7 @@
 //! selecting Rayon's global pool. The executor owns neither circuit data nor
 //! request scratch and receives no caller RNG: proof APIs sample on the calling
 //! thread before entering it for proof work.
-use crate::WorkersConfigError;
+use crate::{WorkersConfigError, tuning::TaskCap};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use udon::exec::{Executor, SerialExecutor, TaskBudget};
 
@@ -139,10 +139,14 @@ impl PoolExecutor {
 
     /// The full budget bounded by one operation's task cap from [`crate::tuning`].
     ///
-    /// A zero cap is treated as one task: caps limit concurrency, never
+    /// A zero fixed cap is treated as one task: caps limit concurrency, never
     /// admission.
-    pub(crate) fn budget_capped(&self, cap: usize) -> TaskBudget {
-        TaskBudget::new(self.budget().get().min(cap.max(1))).expect("nonzero capped budget")
+    pub(crate) fn budget_capped(&self, cap: TaskCap) -> TaskBudget {
+        let limit = match cap {
+            TaskCap::Pool => usize::MAX,
+            TaskCap::Fixed(tasks) => tasks,
+        };
+        TaskBudget::new(self.budget().get().min(limit.max(1))).expect("nonzero capped budget")
     }
 }
 
@@ -228,8 +232,8 @@ mod tests {
     #[test]
     fn capped_budgets_stay_within_the_pool_and_never_hit_zero() {
         let serial = PoolExecutor { pool: None };
-        assert_eq!(serial.budget_capped(usize::MAX), TaskBudget::SERIAL);
-        assert_eq!(serial.budget_capped(0), TaskBudget::SERIAL);
+        assert_eq!(serial.budget_capped(TaskCap::Pool), TaskBudget::SERIAL);
+        assert_eq!(serial.budget_capped(TaskCap::Fixed(0)), TaskBudget::SERIAL);
         let executor = PoolExecutor {
             pool: Some(
                 rayon::ThreadPoolBuilder::new()
@@ -238,9 +242,10 @@ mod tests {
                     .unwrap(),
             ),
         };
-        assert_eq!(executor.budget_capped(usize::MAX).get(), 4);
-        assert_eq!(executor.budget_capped(2).get(), 2);
-        assert_eq!(executor.budget_capped(0).get(), 1);
+        assert_eq!(executor.budget_capped(TaskCap::Pool).get(), 4);
+        assert_eq!(executor.budget_capped(TaskCap::Fixed(2)).get(), 2);
+        assert_eq!(executor.budget_capped(TaskCap::Fixed(0)).get(), 1);
+        assert_eq!(executor.budget_capped(TaskCap::Fixed(9)).get(), 4);
     }
 
     #[test]

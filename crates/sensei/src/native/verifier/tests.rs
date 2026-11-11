@@ -310,8 +310,10 @@ fn archived_current_proofs_have_no_action_count_ceiling() {
 /// invariant checks rather than exact-occupancy assertions.
 pub(super) fn assert_scratch_pools_bounded() {
     let scratch = &VerifierRuntime::get().scratch;
+    assert!(tuning::VERIFIER_EQUATION_SLOTS.contains(&scratch.equation_slots));
+    assert!(tuning::VERIFIER_WORKSPACE_SLOTS.contains(&scratch.workspace_slots));
     let equations = lock(&scratch.equations);
-    assert!(equations.len() <= tuning::VERIFIER_EQUATION_SLOTS);
+    assert!(equations.len() <= scratch.equation_slots);
     for equation in equations.iter() {
         assert!(equation.retained_bytes() <= tuning::VERIFIER_EQUATION_MAX_BYTES);
         assert!(equation.points.is_empty() && equation.scalars.is_empty());
@@ -319,9 +321,41 @@ pub(super) fn assert_scratch_pools_bounded() {
     }
     drop(equations);
     let workspaces = lock(&scratch.workspaces);
-    assert!(workspaces.len() <= tuning::VERIFIER_WORKSPACE_SLOTS);
+    assert!(workspaces.len() <= scratch.workspace_slots);
     for workspace in workspaces.iter() {
         assert!(workspace.retained_bytes() <= tuning::VERIFIER_WORKSPACE_MAX_BYTES);
+    }
+}
+
+#[test]
+fn scratch_pool_slots_follow_the_worker_budget() {
+    let equations = tuning::VERIFIER_EQUATION_SLOTS;
+    let workspaces = tuning::VERIFIER_WORKSPACE_SLOTS;
+    for budget in [1, 2, 8, 16, 24, 32, 64, 128] {
+        let slots = tuning::verifier_equation_slots(budget);
+        assert!(equations.contains(&slots));
+        assert!(
+            slots >= budget.min(*equations.end()),
+            "one batch's chunks fit"
+        );
+        assert!(workspaces.contains(&tuning::verifier_workspace_slots(budget)));
+    }
+    assert_eq!(tuning::verifier_equation_slots(16), 32);
+    assert_eq!(tuning::verifier_workspace_slots(16), 4);
+    assert_eq!(
+        tuning::verifier_workspace_slots(32),
+        (32 / tuning::VERIFIER_WORKSPACE_WORKERS_PER_SLOT)
+            .clamp(*workspaces.start(), *workspaces.end())
+    );
+    // Monotone in the budget.
+    let mut last = (0, 0);
+    for budget in 1..=256 {
+        let next = (
+            tuning::verifier_equation_slots(budget),
+            tuning::verifier_workspace_slots(budget),
+        );
+        assert!(next.0 >= last.0 && next.1 >= last.1);
+        last = next;
     }
 }
 
@@ -350,7 +384,7 @@ fn bounded_pools_survive_success_and_failure() {
 
 #[test]
 fn scratch_pool_returns_reset_entries_and_honors_ceilings() {
-    let scratch = VerifierScratch::new();
+    let scratch = VerifierScratch::new(16, 4);
     // A used equation returns reset, with its capacity retained for reuse.
     let mut equation = scratch.lease_equation();
     equation.versions = 3;
@@ -379,19 +413,17 @@ fn scratch_pool_returns_reset_entries_and_honors_ceilings() {
     scratch.return_equation(oversized);
     assert!(lock(&scratch.equations).is_empty());
     // A full pool drops further returns instead of growing.
-    for _ in 0..tuning::VERIFIER_EQUATION_SLOTS + 3 {
+    for _ in 0..scratch.equation_slots + 3 {
         scratch.return_equation(Equation::new());
     }
-    assert_eq!(
-        lock(&scratch.equations).len(),
-        tuning::VERIFIER_EQUATION_SLOTS
-    );
-    for _ in 0..tuning::VERIFIER_WORKSPACE_SLOTS + 3 {
+    assert_eq!(lock(&scratch.equations).len(), scratch.equation_slots);
+    for _ in 0..scratch.workspace_slots + 3 {
         scratch.return_workspace(MsmWorkspace::new());
     }
+    assert_eq!(lock(&scratch.workspaces).len(), scratch.workspace_slots);
     assert_eq!(
-        lock(&scratch.workspaces).len(),
-        tuning::VERIFIER_WORKSPACE_SLOTS
+        scratch.max_idle_bytes(),
+        16 * tuning::VERIFIER_EQUATION_MAX_BYTES + 4 * tuning::VERIFIER_WORKSPACE_MAX_BYTES
     );
 }
 
@@ -419,11 +451,40 @@ fn warm_up_scratch_provisions_a_matching_workspace() {
     // provisioned workspace evaluates it without growing.
     runtime.evaluate(&combined, &mut workspace).unwrap();
     assert_eq!(workspace.retained_bytes(), provisioned);
-    // The public entry point keeps the global pools within their bounds.
-    crate::warm_up_verifier_scratch(16, 32);
+    // The public entry point keeps the global pools within their bounds and
+    // reports the shape it provisioned.
+    let plan = crate::warm_up_verifier_scratch(16, 32);
     assert_scratch_pools_bounded();
-    crate::warm_up_verifier_scratch(0, 0);
+    assert_eq!(plan.fold_tasks, fold_jobs(runtime.fold_cap(), 16, 32));
+    assert_eq!(
+        plan.msm_tasks,
+        runtime.msm_budget(16 * combined.points.len() / 4).get()
+    );
+    assert!(plan.retained);
+    assert!(plan.workspace_bytes > 0 && plan.equation_bytes > 0);
+    assert_eq!(plan.pooled_batches, runtime.scratch.workspace_slots);
+    assert_eq!(plan.max_idle_bytes, runtime.scratch.max_idle_bytes());
+    assert!(plan.workspace_bytes + plan.equation_bytes <= plan.max_idle_bytes);
+    // Warming only reports the pools' policy, with nothing provisioned.
+    let warmed = crate::warm_up_verifier_scratch(0, 0);
     assert_scratch_pools_bounded();
+    assert_eq!(
+        (
+            warmed.fold_tasks,
+            warmed.msm_tasks,
+            warmed.workspace_bytes,
+            warmed.equation_bytes
+        ),
+        (0, 0, 0, 0)
+    );
+    assert_eq!(
+        (
+            warmed.pooled_batches,
+            warmed.max_idle_bytes,
+            warmed.retained
+        ),
+        (plan.pooled_batches, plan.max_idle_bytes, true)
+    );
 }
 
 #[test]
@@ -467,7 +528,8 @@ fn benchmark_cold_verification() {
     let scratch = std::env::var_os("SENSEI_COLD_SCRATCH").is_some();
     let start = Instant::now();
     if scratch {
-        crate::warm_up_verifier_scratch(batch, batch * fixture.statements.len());
+        let plan = crate::warm_up_verifier_scratch(batch, batch * fixture.statements.len());
+        println!("plan {plan:?}");
     } else {
         crate::warm_up_verifier();
     }
@@ -530,8 +592,200 @@ fn benchmark_concurrent_verification() {
     let elapsed = start.elapsed();
     println!(
         "concurrent threads={threads} batch={batch} rounds={rounds} \
-         total={elapsed:?} per-batch={:.3}ms",
-        elapsed.as_secs_f64() * 1e3 / (threads * rounds) as f64
+         total={elapsed:?} per-batch={:.3}ms peak_rss_kib={:?}",
+        elapsed.as_secs_f64() * 1e3 / (threads * rounds) as f64,
+        peak_rss_kib(),
+    );
+}
+
+/// The process's peak resident set size from `/proc/self/status` (Linux).
+fn peak_rss_kib() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|value| value.trim().trim_end_matches("kB").trim().parse().ok())
+}
+
+/// Per-stage attribution of repeated warm verification of one batch shape,
+/// for tuning the fold and final-MSM budgets on a given machine.
+///
+/// Environment: `SENSEI_VERIFY_PROOFS` (64), `SENSEI_VERIFY_ACTIONS` per proof
+/// (2; 1 and 2 use the archived current proofs, 128 the migrated 128-Action
+/// proof), `SENSEI_VERIFY_REPS` (50), `SENSEI_VERIFY_WARMUP` untimed calls
+/// (5), `SENSEI_VERIFY_SCRATCH` (provision the pools for the shape first),
+/// `SENSEI_VERIFY_COLD_SCRATCH` (drain both pools before every timed call,
+/// measuring the allocate-every-call cost), `SENSEI_VERIFY_TRACE` (one line
+/// per call), plus `SENSEI_BENCH_WORKERS` for the pool size.
+#[test]
+#[ignore = "manual staged verification benchmark; --release --nocapture, one process per worker count"]
+fn benchmark_verification_stages() {
+    use std::time::Instant;
+    let setting = |name: &str, default: usize| -> usize {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.parse().expect("positive integer setting"))
+            .unwrap_or(default)
+    };
+    let proofs = setting("SENSEI_VERIFY_PROOFS", 64);
+    let actions = setting("SENSEI_VERIFY_ACTIONS", 2);
+    let reps = setting("SENSEI_VERIFY_REPS", 50);
+    let warmup = setting("SENSEI_VERIFY_WARMUP", 5);
+    let provision = std::env::var_os("SENSEI_VERIFY_SCRATCH").is_some();
+    let cold_scratch = std::env::var_os("SENSEI_VERIFY_COLD_SCRATCH").is_some();
+    let trace = std::env::var_os("SENSEI_VERIFY_TRACE").is_some();
+    assert!(proofs > 0 && reps > 0);
+    let fixture = match actions {
+        1 | 2 => corpus::current(actions),
+        128 => corpus::migrated_current(128, true),
+        _ => panic!("SENSEI_VERIFY_ACTIONS must be 1, 2, or 128"),
+    };
+    let requests = vec![fixture.request(); proofs];
+    if provision {
+        crate::warm_up_verifier_scratch(proofs, proofs * actions);
+    } else {
+        crate::warm_up_verifier();
+    }
+    let workers = crate::worker_budget();
+    let runtime = VerifierRuntime::get();
+    let drain = || {
+        lock(&runtime.scratch.equations).clear();
+        lock(&runtime.scratch.workspaces).clear();
+    };
+    for _ in 0..warmup {
+        crate::verify_proofs(&requests, &mut || Ok(93)).unwrap();
+    }
+
+    const GROUPS: [&str; 4] = ["srs", "vk", "lagrange", "dynamic"];
+    struct Sample {
+        total: u128,
+        timings: timing::VerifyTimings,
+        traffic: [usize; 6],
+    }
+    let mut samples = Vec::with_capacity(reps);
+    for rep in 0..reps {
+        if cold_scratch {
+            drain();
+        }
+        let before = runtime.scratch.snapshot();
+        timing::enable();
+        let started = Instant::now();
+        crate::verify_proofs(&requests, &mut || Ok(93)).unwrap();
+        let total = started.elapsed().as_nanos();
+        let timings = timing::take().expect("attributed verification");
+        let after = runtime.scratch.snapshot();
+        let traffic = [
+            after.equation_misses - before.equation_misses,
+            after.equation_ceiling_drops - before.equation_ceiling_drops,
+            after.equation_full_drops - before.equation_full_drops,
+            after.workspace_misses - before.workspace_misses,
+            after.workspace_ceiling_drops - before.workspace_ceiling_drops,
+            after.workspace_full_drops - before.workspace_full_drops,
+        ];
+        if trace {
+            let stages: Vec<_> = timing::NAMES
+                .iter()
+                .zip(timings.elapsed_ns)
+                .map(|(name, ns)| format!("{name}={ns}"))
+                .collect();
+            println!(
+                "SENSEI_VERIFY_TRACE rep={rep} total={total} {} workspace_after={} traffic={traffic:?}",
+                stages.join(" "),
+                timings.facts.workspace_after,
+            );
+        }
+        samples.push(Sample {
+            total,
+            timings,
+            traffic,
+        });
+    }
+
+    fn median(values: &mut [u128]) -> u128 {
+        values.sort_unstable();
+        values[values.len() / 2]
+    }
+    fn p90(values: &mut [u128]) -> u128 {
+        values.sort_unstable();
+        values[values.len() * 9 / 10]
+    }
+    let collect = |f: &dyn Fn(&Sample) -> u128| -> Vec<u128> { samples.iter().map(f).collect() };
+    let stage = |index: usize| -> Vec<u128> { collect(&|s| s.timings.elapsed_ns[index]) };
+    let stages: Vec<_> = timing::NAMES
+        .iter()
+        .enumerate()
+        .map(|(index, name)| format!("{name}={}", median(&mut stage(index))))
+        .collect();
+    println!(
+        "SENSEI_T_VERIFY_NS workers={workers} proofs={proofs} actions={} reps={reps} total={} {}",
+        proofs * actions,
+        median(&mut collect(&|s| s.total)),
+        stages.join(" "),
+    );
+    println!(
+        "SENSEI_T_VERIFY_P90_NS total={} fold={} msm_execute={}",
+        p90(&mut collect(&|s| s.total)),
+        p90(&mut stage(timing::Stage::Fold as usize)),
+        p90(&mut stage(timing::Stage::MsmExecute as usize)),
+    );
+    let facts = &samples[0].timings.facts;
+    println!(
+        "SENSEI_VERIFY_FOLD jobs={} chunk={} tasks={} sum_ns={} max_ns={} \
+         prefetch_tasks={} prefetch_sum_ns={} prefetch_max_ns={}",
+        facts.fold_jobs,
+        facts.fold_chunk,
+        samples[0].timings.fold.count,
+        median(&mut collect(&|s| s.timings.fold.sum_ns.into())),
+        median(&mut collect(&|s| s.timings.fold.max_ns.into())),
+        samples[0].timings.prefetch.count,
+        median(&mut collect(&|s| s.timings.prefetch.sum_ns.into())),
+        median(&mut collect(&|s| s.timings.prefetch.max_ns.into())),
+    );
+    let groups: Vec<_> = GROUPS
+        .iter()
+        .zip(&facts.msm_groups)
+        .map(|(name, (partitions, slots, grain))| format!("{name}:{partitions}/{slots}/{grain}"))
+        .collect();
+    let probes: Vec<_> = GROUPS
+        .iter()
+        .enumerate()
+        .map(|(group, name)| {
+            let kinds: Vec<_> = timing::MSM_TASK_KINDS
+                .iter()
+                .enumerate()
+                .map(|(kind, token)| {
+                    format!(
+                        "{}:{}/{}/{}",
+                        &token[..1],
+                        samples[0].timings.msm[group][kind].count,
+                        median(&mut collect(&|s| s.timings.msm[group][kind].sum_ns.into())),
+                        median(&mut collect(&|s| s.timings.msm[group][kind].max_ns.into())),
+                    )
+                })
+                .collect();
+            format!("{name}={}", kinds.join("|"))
+        })
+        .collect();
+    println!(
+        "SENSEI_VERIFY_MSM budget={} workers={} groups={} {}",
+        facts.msm_budget,
+        facts.msm_workers,
+        groups.join(","),
+        probes.join(" "),
+    );
+    let traffic = |index: usize| -> u128 { median(&mut collect(&|s| s.traffic[index] as u128)) };
+    println!(
+        "SENSEI_VERIFY_SCRATCH workspace_before={} workspace_after={} eq_miss={} eq_ceiling_drop={} \
+         eq_full_drop={} ws_miss={} ws_ceiling_drop={} ws_full_drop={} peak_rss_kib={:?}",
+        median(&mut collect(&|s| s.timings.facts.workspace_before as u128)),
+        median(&mut collect(&|s| s.timings.facts.workspace_after as u128)),
+        traffic(0),
+        traffic(1),
+        traffic(2),
+        traffic(3),
+        traffic(4),
+        traffic(5),
+        peak_rss_kib(),
     );
 }
 
