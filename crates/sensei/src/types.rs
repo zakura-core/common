@@ -337,35 +337,29 @@ pub struct VerificationRequest<'a> {
     pub(crate) statements: &'a [PublicStatement],
     pub(crate) proof: &'a [u8],
 }
-/// What one verification batch shape requests from the shared worker pool
-/// and retains in the verifier's idle scratch pools, as provisioned by
-/// [`crate::warm_up_verifier_scratch`].
+/// What one verification batch shape retains in the verifier's idle scratch
+/// pools, as provisioned by [`crate::warm_up_verifier_scratch`].
 ///
-/// Task counts are planning allowances within the pool, not thread
-/// reservations: concurrent batches share the pool's workers by work
-/// stealing. Admission control can bound in-flight batches by
-/// `pooled_batches` to keep every batch on retained scratch, and by the
-/// pool's [`crate::worker_budget`] relative to `fold_tasks` to keep the
-/// workers busy without oversubscribing them.
+/// The byte figures measure the entries the warm-up provisions: one final-MSM
+/// workspace and one equation entry per proof-folding chunk. Merging a
+/// multi-chunk batch then grows one of those entries to hold all of the
+/// batch's transcript points, which neither the figures nor `retained`
+/// count; `max_idle_bytes` bounds the pools either way.
 #[cfg(feature = "verifier")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct VerificationPlan {
-    /// Concurrent proof-folding tasks the shape cuts: at most the pool's
-    /// fold budget and the proof count. One equation entry is leased per task.
-    pub fold_tasks: usize,
-    /// Final-equation MSM tasks the shape requests, at most the pool's MSM
-    /// budget.
-    pub msm_tasks: usize,
     /// Retained capacity in bytes of the final-MSM workspace provisioned for
     /// the shape. A concurrent call beyond `pooled_batches` allocates about
     /// this much and discards it afterwards.
     pub workspace_bytes: usize,
-    /// Total retained capacity in bytes of the `fold_tasks` equation entries
+    /// Total retained capacity in bytes of the per-chunk equation entries
     /// provisioned for the shape.
     pub equation_bytes: usize,
-    /// Batches the idle pools serve concurrently without allocating scratch:
-    /// the sustainable concurrency for admission control.
+    /// Batches the idle pools serve concurrently without allocating a
+    /// final-MSM workspace, the largest piece of scratch: an upper bound for
+    /// admission control, not a target. Equation entries are pooled
+    /// separately, and concurrent batches may allocate some of them.
     pub pooled_batches: usize,
     /// Whether every provisioned entry fits its retention ceiling and was
     /// kept. `false` means this shape reallocates its scratch on every call.

@@ -532,28 +532,18 @@ fn warm_up_scratch_provisions_a_matching_workspace() {
     // reports the shape it provisioned.
     let plan = crate::warm_up_verifier_scratch(16, 32);
     assert_scratch_pools_bounded();
-    assert_eq!(plan.fold_tasks, fold_jobs(runtime.fold_cap(), 16, 32));
-    assert_eq!(
-        plan.msm_tasks,
-        runtime.msm_budget(16 * combined.points.len() / 4).get()
-    );
     assert!(plan.retained);
-    assert!(plan.workspace_bytes > 0 && plan.equation_bytes > 0);
+    assert!(plan.workspace_bytes > 0);
+    // One equation entry per fold chunk, each holding more than an empty one.
+    let chunks = fold_jobs(runtime.fold_cap(), 16, 32);
+    assert!(plan.equation_bytes > chunks * Equation::new().retained_bytes());
     assert_eq!(plan.pooled_batches, runtime.scratch.workspace_slots);
     assert_eq!(plan.max_idle_bytes, runtime.scratch.max_idle_bytes());
     assert!(plan.workspace_bytes + plan.equation_bytes <= plan.max_idle_bytes);
     // Warming only reports the pools' policy, with nothing provisioned.
     let warmed = crate::warm_up_verifier_scratch(0, 0);
     assert_scratch_pools_bounded();
-    assert_eq!(
-        (
-            warmed.fold_tasks,
-            warmed.msm_tasks,
-            warmed.workspace_bytes,
-            warmed.equation_bytes
-        ),
-        (0, 0, 0, 0)
-    );
+    assert_eq!((warmed.workspace_bytes, warmed.equation_bytes), (0, 0));
     assert_eq!(
         (
             warmed.pooled_batches,

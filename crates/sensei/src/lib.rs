@@ -332,15 +332,15 @@ pub fn warm_up_verifier() {
 /// larger than the pools' per-entry retention ceilings is provisioned but not
 /// retained (the plan reports `retained: false`). Calling again with a larger
 /// shape tops the pools up; `proofs` of zero only warms the verifier and
-/// reports a plan with zero tasks and bytes. Consumes no randomness.
+/// reports a plan with zero provisioned bytes. Consumes no randomness.
 ///
 /// The plan is computed under the pool's final worker budget, so call
-/// [`configure_workers`] first. For admission control, bound in-flight
-/// batches by `pooled_batches`: every batch beyond that allocates and
-/// discards `workspace_bytes` of scratch per call, and the pools never retain
-/// more than `max_idle_bytes`. On a 32-worker pool a node expecting 64-proof
-/// batches would therefore admit `min(plan.pooled_batches, its own pool size)`
-/// batches at once.
+/// [`configure_workers`] first. For admission control, `pooled_batches` is an
+/// upper bound on in-flight batches, not a target: every batch beyond it
+/// allocates and discards `workspace_bytes` of scratch per call, and the
+/// pools never retain more than `max_idle_bytes`. Concurrent batches share
+/// the pool's workers, so each additional in-flight batch adds less
+/// throughput while every batch's latency and the process's peak memory grow.
 #[cfg(feature = "verifier")]
 pub fn warm_up_verifier_scratch(proofs: usize, actions: usize) -> VerificationPlan {
     native::verifier::warm_up_verifier_scratch(proofs, actions)

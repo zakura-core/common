@@ -144,9 +144,15 @@ pub(crate) fn verifier_equation_slots(fold_budget: usize) -> usize {
 /// Per-entry retained-capacity ceiling for pooled equation scratch.
 pub(crate) const VERIFIER_EQUATION_MAX_BYTES: usize = 4 << 20;
 /// Idle final-MSM workspaces: the concurrently verifying batches the pools
-/// serve without allocating, one slot per `VERIFIER_WORKSPACE_WORKERS_PER_SLOT`
-/// workers within this range. `warm_up_verifier_scratch` reports the result
-/// as the sustainable concurrency for admission control.
+/// serve without allocating one, one slot per
+/// `VERIFIER_WORKSPACE_WORKERS_PER_SLOT` workers within this range.
+/// `warm_up_verifier_scratch` reports the result as admission control's
+/// upper bound, not a target: the last slots buy little. Intel anchors
+/// (i9-7960X, 64 two-Action proofs, proofs only): against one batch at a
+/// time, 2 / 4 / 8 in-flight batches verify about 16% / 28% / 30% more
+/// proofs per second on 32 workers, 9% / 15% / 16% more on 16 workers
+/// (whose peak resident memory nearly triples from four to eight, past its
+/// slots), and 3% / 7% / 7% more on 8 workers.
 pub(crate) const VERIFIER_WORKSPACE_SLOTS: core::ops::RangeInclusive<usize> = 4..=8;
 pub(crate) const VERIFIER_WORKSPACE_WORKERS_PER_SLOT: usize = 4;
 pub(crate) fn verifier_workspace_slots(workers: usize) -> usize {

@@ -560,13 +560,12 @@ pub(crate) fn warm_up_verifier() {
 /// Provisions the bounded idle scratch pools for an expected batch shape and
 /// reports its plan; the public [`crate::warm_up_verifier_scratch`] contract
 /// describes the sizing. The plan's bytes are measured on the entries just
-/// provisioned, so they match what `verify` leases for the same shape.
+/// provisioned: `verify` leases the same entries for the shape, then grows
+/// one of them to the whole batch when it merges the chunks.
 pub(crate) fn warm_up_verifier_scratch(proofs: usize, actions: usize) -> VerificationPlan {
     let runtime = VerifierRuntime::get();
     let scratch = &runtime.scratch;
     let mut plan = VerificationPlan {
-        fold_tasks: 0,
-        msm_tasks: 0,
         workspace_bytes: 0,
         equation_bytes: 0,
         pooled_batches: scratch.workspace_slots,
@@ -583,8 +582,6 @@ pub(crate) fn warm_up_verifier_scratch(proofs: usize, actions: usize) -> Verific
     let per_proof = super::protocol::transcript_encoding::point_runs(actions.div_ceil(proofs))
         .map_or(0, |runs| runs.iter().map(|(_, count)| count).sum());
     let chunk_points = per_proof * proofs.div_ceil(jobs);
-    plan.fold_tasks = jobs;
-    plan.msm_tasks = runtime.msm_budget(per_proof * proofs).get();
     // Hold every lease before returning any, so the pool keeps `jobs` distinct
     // provisioned equations rather than re-provisioning one repeatedly.
     let mut equations: Vec<_> = (0..jobs).map(|_| scratch.lease_equation()).collect();
