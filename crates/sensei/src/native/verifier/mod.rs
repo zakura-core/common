@@ -415,6 +415,12 @@ impl VerifierRuntime {
                 Input::indexed(bases, indices, &selected[..indices.len()])
                     .map_err(|_| Error::InternalInvariant)?
             };
+            // Slicing pairs two chunk iterators, which would drop a trailing
+            // chunk silently if these lengths ever differed; `Input::new`
+            // checks only each pair.
+            if equation.points.len() != equation.scalars.len() {
+                return Err(Error::InternalInvariant);
+            }
             let budget = self.msm_budget(equation.points.len());
             // Equation::new/point/merge preserve these bank and point/scalar
             // lengths; every input produces exactly one output below.
@@ -748,6 +754,10 @@ pub(crate) fn verify(
         timing.mark(timing::Stage::Fold);
         // Drain every chunk result — returning each merged shell to the pool —
         // before reporting the batch's first error, so failures keep scratch.
+        // The first equation absorbs the rest: sizing it once keeps its
+        // capacity exact, so whether it returns to the pool follows the
+        // batch's size rather than amortized growth past the ceiling.
+        let points: usize = results.iter().flatten().map(|e| e.points.len()).sum();
         let mut combined: Option<Equation> = None;
         let mut failure = None;
         for result in results {
@@ -757,7 +767,12 @@ pub(crate) fn verify(
                         combined.merge(&mut equation);
                         runtime.scratch.return_equation(equation);
                     }
-                    None => combined = Some(equation),
+                    None => {
+                        let extra = points - equation.points.len();
+                        equation.points.reserve_exact(extra);
+                        equation.scalars.reserve_exact(extra);
+                        combined = Some(equation);
+                    }
                 },
                 Err(error) => failure = failure.or(Some(error)),
             }

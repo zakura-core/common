@@ -153,43 +153,120 @@ fn split_equation_matches_an_affine_msm() {
     dense.scalars = vec![<Fp>::ZERO, <Fp>::ONE.neg(), step];
 
     for equation in [Equation::new(), boundaries, dense] {
-        let equation_affine: Vec<_> = equation
-            .points
-            .iter()
-            .map(PreparedAffinePoint::to_affine)
-            .collect();
-        let bases: Vec<_> = PREPARED_POINTS
-            .coefficient_bases
-            .iter()
-            .chain(VK_COMMITMENTS)
-            .chain(&PREPARED_POINTS.lagrange_bases[..INSTANCE_VALUE_COUNT])
-            .chain([
-                &PREPARED_POINTS.blind_generator,
-                &PREPARED_POINTS.ipa_generator,
-            ])
-            .chain(&equation_affine)
-            .copied()
-            .collect();
-        let scalars: Vec<_> = equation
-            .fixed
-            .iter()
-            .chain(&equation.scalars)
-            .copied()
-            .collect();
-        let mut expected = [VestaProjective::IDENTITY];
-        MsmWorkspace::new()
-            .prepare(
-                &[Input::new(Bases::Affine(&bases), &scalars)],
-                udon::exec::TaskBudget::SERIAL,
-            )
-            .unwrap()
-            .execute(&mut expected, &udon::exec::SerialExecutor)
-            .unwrap();
         let actual = runtime
             .evaluate(&equation, &mut MsmWorkspace::new())
             .unwrap();
-        assert_eq!(actual.to_point(), expected[0].to_point());
+        assert_eq!(actual.to_point(), affine_reference(&equation).to_point());
     }
+}
+
+/// The equation as one serial MSM over plain affine bases: independent of the
+/// verifier's input split, slicing, prepared banks, and workspace reuse.
+fn affine_reference(equation: &Equation) -> VestaProjective {
+    let equation_affine: Vec<_> = equation
+        .points
+        .iter()
+        .map(PreparedAffinePoint::to_affine)
+        .collect();
+    let bases: Vec<_> = PREPARED_POINTS
+        .coefficient_bases
+        .iter()
+        .chain(VK_COMMITMENTS)
+        .chain(&PREPARED_POINTS.lagrange_bases[..INSTANCE_VALUE_COUNT])
+        .chain([
+            &PREPARED_POINTS.blind_generator,
+            &PREPARED_POINTS.ipa_generator,
+        ])
+        .chain(&equation_affine)
+        .copied()
+        .collect();
+    let scalars: Vec<_> = equation
+        .fixed
+        .iter()
+        .chain(&equation.scalars)
+        .copied()
+        .collect();
+    let mut expected = [VestaProjective::IDENTITY];
+    MsmWorkspace::new()
+        .prepare(
+            &[Input::new(Bases::Affine(&bases), &scalars)],
+            udon::exec::TaskBudget::SERIAL,
+        )
+        .unwrap()
+        .execute(&mut expected, &udon::exec::SerialExecutor)
+        .unwrap();
+    expected[0]
+}
+
+/// Accept/reject tests only show that a valid batch still sums to the
+/// identity. This compares the sliced final MSM's value for nonzero equations
+/// of every slicing regime, on the three workspace states `verify` can lease:
+/// fresh, reused across other shapes, and provisioned but never executed.
+/// Slice counts follow the pool: a single-worker pool exercises one slice.
+#[test]
+fn sliced_final_msm_matches_an_affine_msm_on_every_workspace_state() {
+    let runtime = VerifierRuntime::get();
+    let step = <Fp>::from_u64(13).invert().unwrap();
+    let floor = tuning::VERIFY_MSM_SLICE_POINTS;
+    let mut reused = MsmWorkspace::new();
+    for (round, count) in [
+        0,
+        1,
+        floor - 1,
+        floor,
+        2 * floor - 1,
+        2 * floor,
+        2 * floor + 1,
+        5000,
+        3,
+        9000,
+        77,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut equation = Equation::new();
+        equation.versions = (VERSION_MASKS - 1) as u8;
+        for (index, scalar) in equation.fixed.iter_mut().enumerate() {
+            *scalar = step.mul(&<Fp>::from_u64((index + round) as u64 + 1));
+        }
+        equation.points = (0..count)
+            .map(|index| {
+                PreparedAffinePoint::from_affine(
+                    &PREPARED_POINTS.coefficient_bases[(7 * index + round) % N],
+                )
+            })
+            .collect();
+        equation.scalars = (0..count)
+            .map(|index| {
+                step.mul(&<Fp>::from_u64((31 * index + round) as u64 + 5))
+                    .neg()
+            })
+            .collect();
+        let expected = affine_reference(&equation);
+        assert!(!expected.is_identity());
+        let mut provisioned = MsmWorkspace::new();
+        runtime.provision_workspace(&mut provisioned, 2 * count.max(1));
+        for (state, workspace) in [
+            ("fresh", &mut MsmWorkspace::new()),
+            ("reused", &mut reused),
+            ("provisioned", &mut provisioned),
+        ] {
+            assert_eq!(
+                runtime.evaluate(&equation, workspace).unwrap().to_point(),
+                expected.to_point(),
+                "{state} workspace, {count} points"
+            );
+        }
+    }
+    // A point without its scalar is an internal fault, never a shorter sum.
+    let mut uneven = Equation::new();
+    uneven.points = vec![PreparedAffinePoint::from_affine(&VestaAffine::GENERATOR); 2 * floor];
+    uneven.scalars = vec![<Fp>::ONE; floor];
+    assert_eq!(
+        runtime.evaluate(&uneven, &mut MsmWorkspace::new()).err(),
+        Some(Error::InternalInvariant)
+    );
 }
 
 /// Compare the entire assembled group equation even when it is nonzero. Merely

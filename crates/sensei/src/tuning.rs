@@ -95,7 +95,7 @@ pub(crate) const VERIFY_MSM_TASK_CAP: TaskCap = TaskCap::Pool;
 /// 64 two-Action proofs): as one Booth(11) input, the 4,928 points expose
 /// twelve window tasks of about 2.6 ms, the MSM's critical path; four slices
 /// cut the final MSM from 3.4 to 3.0 ms at 16 workers and from 4.5 to 2.8 ms
-/// at 32, and shrink the retained workspace from 25.8 MiB to 6.6 MiB (10.5
+/// at 32, and shrink the retained workspace from 25.8 MiB to 6.6 MiB (12.3
 /// MiB at 32 workers). Slicing a 16-proof batch's 1,232 points costs 4-9%,
 /// so the floor sits above it.
 pub(crate) const VERIFY_MSM_SLICE_POINTS: usize = 1024;
@@ -126,10 +126,11 @@ pub(crate) const VERIFY_MSM_MIN_TERMS: usize = 128;
 // Concurrent calls beyond the slot counts allocate fresh scratch and discard
 // it, so a node's admission bound should not exceed the workspace slots.
 // Measured anchors (two-Action proofs, sliced final MSM): a 64-proof batch
-// retains sixteen chunk equations of ≤0.7 MiB, a 1.1 MiB combined equation,
-// and a 6.6 MiB workspace at 16 workers (32 chunks and 10.5 MiB at 32
-// workers); only a batch of several hundred proofs exceeds the equation
-// ceiling with its combined equation.
+// retains fifteen chunk equations of about 0.14 MiB, a 0.7 MiB combined
+// equation (the first chunk's, reserved once at the batch's size), and a
+// 6.6 MiB workspace at 16 workers (31 chunks of about 0.1 MiB and 12.3 MiB
+// at 32 workers); only a batch of more than about 420 proofs exceeds the
+// equation ceiling with its combined equation.
 /// Idle equation-scratch entries: two batches' worth of fold chunks at the
 /// resolved fold budget, within this range, so one batch's chunks always
 /// return to the pool and an overlapping second batch usually does.
