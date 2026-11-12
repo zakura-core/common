@@ -503,6 +503,80 @@ fn prefetch_points<C: CurveAffine>(
         .collect()
 }
 
+/// Point encodings (each `C::Repr` long) decoded per parallel task by
+/// [`prefetch_batch_points`]: a multiple of the eight-lane batch decoder.
+#[cfg(feature = "multicore")]
+const MIN_PREFETCH_CHUNK_POINTS: usize = 32;
+
+/// Decodes the point runs of every proof whose shape has a recorded layout,
+/// as [`prefetch_points`] does for one proof, but splitting all of the
+/// batch's encodings into chunks across the pool, so that a batch with fewer
+/// proofs than workers still decodes in parallel.
+///
+/// Returns one entry per item: `None` when the item's shape has no recorded
+/// layout yet, so the item records one while it is verified.
+fn prefetch_batch_points<C: CurveAffine>(
+    items: &[BatchItem<C>],
+    layouts: &[Option<Arc<[std::ops::Range<usize>]>>],
+) -> Vec<Option<Vec<(usize, Option<C>)>>> {
+    let len = C::Repr::default().as_ref().len();
+    let mut offsets = Vec::new();
+    let mut encodings: Vec<C::Repr> = Vec::new();
+    let mut ends = Vec::with_capacity(items.len());
+    for (item, ranges) in items.iter().zip(layouts) {
+        if let (Some(ranges), true) = (ranges, len != 0) {
+            for range in ranges.iter() {
+                let Some(bytes) = item.proof.get(range.start..range.end.min(item.proof.len()))
+                else {
+                    continue;
+                };
+                for (i, bytes) in bytes.chunks_exact(len).enumerate() {
+                    let mut repr = C::Repr::default();
+                    repr.as_mut().copy_from_slice(bytes);
+                    offsets.push(range.start + i * len);
+                    encodings.push(repr);
+                }
+            }
+        }
+        ends.push(offsets.len());
+    }
+
+    #[cfg(feature = "multicore")]
+    let decoded: Vec<_> = {
+        let threads = crate::multicore::current_num_threads();
+        let chunk = encodings
+            .len()
+            .div_ceil(2 * threads)
+            .next_multiple_of(8)
+            .max(MIN_PREFETCH_CHUNK_POINTS);
+        if threads > 1 && encodings.len() > chunk {
+            use maybe_rayon::prelude::*;
+            encodings
+                .par_chunks(chunk)
+                .flat_map_iter(|chunk| C::batch_decode(chunk))
+                .collect()
+        } else {
+            C::batch_decode(&encodings)
+        }
+    };
+    #[cfg(not(feature = "multicore"))]
+    let decoded = C::batch_decode(&encodings);
+
+    let mut decoded = offsets
+        .into_iter()
+        .zip(decoded)
+        .map(|(offset, point)| (offset, Option::from(point)));
+    let mut start = 0;
+    ends.into_iter()
+        .zip(layouts)
+        .map(|(end, ranges)| {
+            let points = decoded.by_ref().take(end - start).collect();
+            start = end;
+            ranges.as_ref().map(|_| points)
+        })
+        .collect()
+}
+
 /// A verifier that checks multiple proofs in a batch. **This requires the
 /// `batch` crate feature to be enabled.**
 #[derive(Debug, Default)]
@@ -552,19 +626,40 @@ where
                 .chain(vk.permutation.commitments())
                 .copied(),
         ));
-        let instance_commitments = match compute_batch_instance_commitments(params, vk, &items) {
+        let layouts = vk.proof_point_layouts();
+        // A batch with no more proofs than workers decodes all of its proofs'
+        // points up front, split across the pool. Larger batches keep each
+        // proof's decoding inside its own task, next to its transcript.
+        let shapes = items
+            .iter()
+            .map(|item| {
+                if items.len() <= crate::multicore::current_num_threads() {
+                    layouts.get(item.instances.len())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        // Decoding the proofs' points needs only their bytes, so it runs
+        // alongside the instance commitments that start each transcript.
+        let (instance_commitments, prefetched) = crate::multicore::join(
+            || compute_batch_instance_commitments(params, vk, &items),
+            || prefetch_batch_points(&items, &shapes),
+        );
+        let instance_commitments = match instance_commitments {
             Ok(instance_commitments) => instance_commitments,
             Err(_) => return false,
         };
         let items = items
             .into_iter()
             .zip(instance_commitments)
+            .zip(prefetched)
             .collect::<Vec<_>>();
 
         let final_msm = items
             .into_par_iter()
             .enumerate()
-            .map(|(i, (item, instance_commitments))| {
+            .map(|(i, ((item, instance_commitments), prefetched))| {
                 let instances: Vec<Vec<_>> = item
                     .instances
                     .iter()
@@ -584,14 +679,16 @@ where
                     C::Scalar::try_random(&mut SysRng).expect("system randomness must be available")
                 };
                 let strategy = BatchStrategy::new(params, rho_i);
-                let layouts = vk.proof_point_layouts();
                 let circuits = item.instances.len();
-                let mut transcript = match layouts.get(circuits) {
-                    Some(ranges) => PrefetchedBlake2bRead::with_prefetched(
-                        &item.proof[..],
-                        prefetch_points(&item.proof, &ranges),
-                    ),
-                    None => PrefetchedBlake2bRead::recording(&item.proof[..]),
+                let mut transcript = match prefetched {
+                    Some(points) => PrefetchedBlake2bRead::with_prefetched(&item.proof[..], points),
+                    None => match layouts.get(circuits) {
+                        Some(ranges) => PrefetchedBlake2bRead::with_prefetched(
+                            &item.proof[..],
+                            prefetch_points(&item.proof, &ranges),
+                        ),
+                        None => PrefetchedBlake2bRead::recording(&item.proof[..]),
+                    },
                 };
                 let result = verify_proof_with_instance_commitments(
                     params,
