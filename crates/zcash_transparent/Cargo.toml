@@ -35,13 +35,16 @@ sha2 = { version = "0.10", default-features = false }
 bs58 = { version = "0.5", features = ["alloc", "check"], default-features = false }
 hex = { version = "0.4", features = ["alloc"], default-features = false }
 ripemd = { version = "0.1", default-features = false }
+slh-dsa = { version = "=0.2.0-rc.5", default-features = false, features = ["zeroize"], optional = true }
 
 [dev-dependencies]
+secp256k1 = { version = "0.33", default-features = false, features = ["alloc"] }
 proptest = ">=1,<1.7"
 zcash_script = { workspace = true, features = ["signature-validation"] }
 zcash_protocol = { workspace = true, features = ["test-dependencies"] }
 
 [features]
+pq = ["dep:slh-dsa", "zcash_script/pq", "zcash_script/signature-validation"]
 # Wallet key derivation and spending transaction construction, enabled by default.
 wallet = ["dep:zip32"]
 default = ["wallet", "std", "pczt"]

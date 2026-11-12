@@ -88,10 +88,33 @@ pub fn eval<T: Into<opcode::PossiblyBad> + opcode::Evaluable + Clone>(
     stack: interpreter::Stack<Vec<u8>>,
     checker: &dyn interpreter::SignatureChecker,
 ) -> Result<interpreter::Stack<Vec<u8>>, script::Error> {
-    iter.try_fold(interpreter::State::initial(stack), |state, elem| {
+    let initial_state = interpreter::State::initial(stack);
+    #[cfg(feature = "pq")]
+    if flags.contains(interpreter::Flags::NativePq) {
+        crate::pq::check_stack_bytes(&initial_state)?;
+    }
+    iter.try_fold(initial_state, |state, elem| {
         elem.and_then(|op| {
-            op.eval(flags, script_code, checker, state)
-                .map_err(|e| script::Error::Interpreter(Some(op.clone().into()), e))
+            let state = op.eval(flags, script_code, checker, state).map_err(|e| {
+                let failed_opcode = op.clone().into();
+                // Without native execution these bytes retain their legacy error identity.
+                #[cfg(feature = "pq")]
+                let failed_opcode = match failed_opcode {
+                    opcode::PossiblyBad::Good(crate::Opcode::Operation(operation))
+                        if operation.is_pq_signature()
+                            && !flags.contains(interpreter::Flags::NativePq) =>
+                    {
+                        opcode::PossiblyBad::Bad(opcode::Bad::Unknown(operation as u8))
+                    }
+                    other => other,
+                };
+                script::Error::Interpreter(Some(failed_opcode), e)
+            })?;
+            #[cfg(feature = "pq")]
+            if flags.contains(interpreter::Flags::NativePq) {
+                crate::pq::check_stack_bytes(&state)?;
+            }
+            Ok(state)
         })
     })
     .and_then(|final_state| match final_state.vexec.len() {
