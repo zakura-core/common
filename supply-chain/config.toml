@@ -64,7 +64,13 @@ audit-as-crates-io = false
 [policy.zakura-keys]
 audit-as-crates-io = false
 
+[policy.zakura-note-encryption]
+audit-as-crates-io = false
+
 [policy.zakura-orchard]
+audit-as-crates-io = false
+
+[policy.zakura-orchard-legacy]
 audit-as-crates-io = false
 
 [policy.zakura-pairing]
@@ -626,6 +632,10 @@ criteria = "safe-to-deploy"
 [[exemptions.keccak]]
 version = "0.1.6"
 criteria = "safe-to-run"
+
+[[exemptions.keccak]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
 
 [[exemptions.known-folders]]
 version = "1.4.2"

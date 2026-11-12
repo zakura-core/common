@@ -549,6 +549,31 @@ impl TransparentBuilder {
         }
     }
 
+    /// Adds a post-quantum output committing to `commitment` under `parameters`.
+    ///
+    /// The commitment is `SHA-256` of the script the recipient will spend with, which the
+    /// recipient publishes in place of an address; the body itself stays with whoever will
+    /// spend the output. Nothing here can check that a body exists for this commitment, so
+    /// a wrong commitment makes an output nobody can spend, exactly as a wrong address does.
+    ///
+    /// This takes a parameter set rather than a script, so the version written is always one
+    /// that is defined: there is no way through this builder to create an output in a
+    /// version nothing implements. Whether these outputs may be created at all at a given
+    /// height is the caller's to enforce; see [`crate::pq::output`].
+    #[cfg(feature = "pq")]
+    pub fn add_pq_output(
+        &mut self,
+        parameters: crate::pq::ParameterSet,
+        commitment: &[u8; 32],
+        value: Zatoshis,
+    ) -> Result<(), Error> {
+        let script_pubkey =
+            crate::pq::output::output_script_from_commitment(parameters, commitment);
+        self.vout.push(TxOut::new(value, Script(script_pubkey)));
+
+        Ok(())
+    }
+
     /// Adds a zero-value "null data" (OP_RETURN) output containing the given data.
     pub fn add_null_data_output(&mut self, data: &[u8]) -> Result<(), Error> {
         // Check 80 bytes limit.

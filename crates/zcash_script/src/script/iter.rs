@@ -8,6 +8,37 @@ use crate::{
     script::{self, Evaluable},
 };
 
+/// The one place the legacy evaluator decides to refuse a PQ-namespace script.
+///
+/// Pairing the flag with the predicate here means a later call site cannot pick up one
+/// without the other, which would be fail-open.
+fn refuse_pq_namespace(flags: interpreter::Flags, script: &[u8]) -> Result<(), script::Error> {
+    if flags.contains(interpreter::Flags::PqOutputs) && script::is_pq_namespace(script) {
+        return Err(script::Error::PqNamespace);
+    }
+    Ok(())
+}
+
+/// [`refuse_pq_namespace`] for a typed component, whose bytes have to be materialized.
+///
+/// The flag is tested first so that nothing allocates while the rule is inactive, and the
+/// length before `to_bytes`, so that only a script whose length could put it in the
+/// namespace pays for it. The namespace spans a range of lengths rather than one, since a
+/// format fixes its own commitment length, so this is a cheap bound rather than an exact
+/// test; [`script::is_pq_namespace`] remains the only decision.
+fn refuse_pq_namespace_component<T: script::Evaluable>(
+    flags: interpreter::Flags,
+    component: &T,
+) -> Result<(), script::Error> {
+    if flags.contains(interpreter::Flags::PqOutputs)
+        && (script::PQ_NAMESPACE_MIN_BYTES..=script::PQ_NAMESPACE_MAX_BYTES)
+            .contains(&component.byte_len())
+    {
+        return refuse_pq_namespace(flags, &component.to_bytes());
+    }
+    Ok(())
+}
+
 /// Evaluate an entire script.
 pub fn eval_script<T: script::Evaluable, U: script::Evaluable>(
     sig: &T,
@@ -15,6 +46,12 @@ pub fn eval_script<T: script::Evaluable, U: script::Evaluable>(
     flags: interpreter::Flags,
     checker: &dyn interpreter::SignatureChecker,
 ) -> Result<bool, (script::ComponentType, script::Error)> {
+    // This comes before anything reads the scriptSig, because it must not depend on it: a
+    // namespace script is satisfied by an empty scriptSig under these rules, so the refusal
+    // has to come from the output alone. Deciding it first also stops a spender from
+    // choosing which error a node reports by varying the sig.
+    refuse_pq_namespace_component(flags, pub_key)
+        .map_err(|e| (script::ComponentType::PubKey, e))?;
     if flags.contains(interpreter::Flags::SigPushOnly) && !sig.is_push_only() {
         Err((script::ComponentType::Sig, script::Error::SigPushOnly))
     } else {
@@ -35,6 +72,13 @@ pub fn eval_script<T: script::Evaluable, U: script::Evaluable>(
                         .split_last()
                         .map_err(|_| script::Error::MissingRedeemScript)
                         .and_then(|(pub_key_2, remaining_stack)| {
+                            // The same refusal for a redeem script, so the rule is simply
+                            // that the legacy evaluator never runs a namespace script. A
+                            // P2SH wrapper hides it behind a hash until the first spend,
+                            // but it is satisfied by no arguments at all, so a wallet
+                            // treating a P2SH-wrapped PQ script as PQ-protected would be
+                            // wrong.
+                            refuse_pq_namespace(flags, pub_key_2)?;
                             script::Code(pub_key_2.clone()).eval(flags, checker, remaining_stack)
                         })
                         .map(|p2sh_stack| {
@@ -81,17 +125,49 @@ pub fn eval_script<T: script::Evaluable, U: script::Evaluable>(
     }
 }
 
+/// Additional stack-payload accounting; opcode stack-depth limits always apply.
+/// This bounds stack memory when large PQ signatures are duplicated or moved
+/// between stacks. The abstraction is kept general for possible future uses
+/// that need an additional stack-byte limit.
+pub(crate) enum AdditionalStackByteLimit {
+    None,
+    #[cfg(feature = "pq")]
+    Limited(usize),
+}
+
+impl AdditionalStackByteLimit {
+    fn check(&self, _state: &interpreter::State) -> Result<(), interpreter::Error> {
+        match self {
+            Self::None => Ok(()),
+            #[cfg(feature = "pq")]
+            Self::Limited(limit) => _state.check_stack_bytes(*limit),
+        }
+    }
+}
+
+/// Executes parsed instructions with the caller's verifier and stack-byte rule.
+/// Parsing limits and final spending conditions remain with the calling path.
 pub fn eval<T: Into<opcode::PossiblyBad> + opcode::Evaluable + Clone>(
     mut iter: impl Iterator<Item = Result<T, script::Error>>,
     flags: interpreter::Flags,
     script_code: &script::Code,
     stack: interpreter::Stack<Vec<u8>>,
     checker: &dyn interpreter::SignatureChecker,
+    additional_stack_byte_limit: AdditionalStackByteLimit,
 ) -> Result<interpreter::Stack<Vec<u8>>, script::Error> {
-    iter.try_fold(interpreter::State::initial(stack), |state, elem| {
+    let initial_state = interpreter::State::initial(stack);
+    additional_stack_byte_limit
+        .check(&initial_state)
+        .map_err(|e| script::Error::Interpreter(None, e))?;
+    iter.try_fold(initial_state, |state, elem| {
         elem.and_then(|op| {
-            op.eval(flags, script_code, checker, state)
-                .map_err(|e| script::Error::Interpreter(Some(op.clone().into()), e))
+            let state = op
+                .eval(flags, script_code, checker, state)
+                .map_err(|e| script::Error::Interpreter(Some(op.clone().into()), e))?;
+            additional_stack_byte_limit
+                .check(&state)
+                .map_err(|e| script::Error::Interpreter(Some(op.into()), e))?;
+            Ok(state)
         })
     })
     .and_then(|final_state| match final_state.vexec.len() {
@@ -166,5 +242,268 @@ mod sig_op_count_tests {
 
         // A truncated push stops the count, like zcashd's GetOp returning false.
         assert_eq!(Code(Vec::from([0xacu8, 0x05, 0x01])).sig_op_count(true), 1);
+    }
+}
+
+#[cfg(test)]
+mod pq_namespace_tests {
+    use alloc::vec::Vec;
+
+    use ripemd::Ripemd160;
+    use sha2::{Digest, Sha256};
+
+    use crate::{
+        interpreter::{Flags, NullSignatureChecker},
+        script::{self, Code},
+    };
+
+    /// A commitment that is not all zeroes, so it is truthy on the stack.
+    const COMMITMENT: [u8; 32] = [7; 32];
+
+    /// The canonical namespace script for `scheme`: `OP_0 OP_<scheme> 0x20 <32 bytes>`.
+    fn namespace_script(scheme: u8) -> Vec<u8> {
+        let mut bytes = Vec::from([0x00, 0x50 + scheme, 0x20]);
+        bytes.extend_from_slice(&COMMITMENT);
+        bytes
+    }
+
+    fn eval(sig: Vec<u8>, pub_key: Vec<u8>, flags: Flags) -> Result<bool, script::Error> {
+        script::Raw::from_raw_parts(sig, pub_key)
+            .eval(flags, &NullSignatureChecker())
+            .map_err(|(_, error)| error)
+    }
+
+    fn eval_full(
+        sig: Vec<u8>,
+        pub_key: Vec<u8>,
+        flags: Flags,
+    ) -> Result<bool, (script::ComponentType, script::Error)> {
+        script::Raw::from_raw_parts(sig, pub_key).eval(flags, &NullSignatureChecker())
+    }
+
+    /// Without the flag a namespace script is anyone-can-spend. This is the exposure the
+    /// flag exists to close, and it is asserted so that it cannot change unnoticed: if the
+    /// format ever stops being claimable under legacy rules, this test says so.
+    #[test]
+    fn a_namespace_script_is_satisfied_by_an_empty_sig_without_the_flag() {
+        assert_eq!(
+            eval(Vec::new(), namespace_script(1), Flags::empty()),
+            Ok(true)
+        );
+        assert_eq!(eval(Vec::new(), namespace_script(1), Flags::P2SH), Ok(true));
+    }
+
+    /// Everything the namespace claims is refused, not only the shapes some format
+    /// defines, so nothing inside it can be swept through this evaluator while it waits to
+    /// be defined. That is the whole point of claiming more than is defined: a shape left
+    /// out here would be spendable under the legacy rules and could no longer be taken
+    /// back.
+    #[test]
+    fn the_flag_refuses_everything_the_namespace_claims() {
+        for scheme in 1..=16u8 {
+            assert_eq!(
+                eval_full(Vec::new(), namespace_script(scheme), Flags::PqOutputs),
+                Err((script::ComponentType::PubKey, script::Error::PqNamespace)),
+                "scheme {scheme} was not refused"
+            );
+        }
+        // Every format opcode, every scheme opcode, and every commitment length a single
+        // direct push can carry, including both ends of that range.
+        for format in [0x00u8, 0x51, 0x59, 0x60] {
+            for scheme in [0x51u8, 0x52, 0x5f, 0x60] {
+                for commitment in [1usize, 20, 32, 48, 0x4b] {
+                    let mut script = Vec::from([format, scheme, commitment as u8]);
+                    script.resize(3 + commitment, 7);
+                    assert_eq!(
+                        eval_full(Vec::new(), script, Flags::PqOutputs),
+                        Err((script::ComponentType::PubKey, script::Error::PqNamespace)),
+                        "format {format:#04x} scheme {scheme:#04x} \
+                         commitment {commitment} was not refused"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The refusal comes from the output alone. It must not depend on the scriptSig, or a
+    /// spender could pick which error a node reports, and an unparsable sig must not mask
+    /// it either.
+    #[test]
+    fn the_refusal_does_not_depend_on_the_script_sig() {
+        let mut long_push = Vec::from([100u8]);
+        long_push.extend_from_slice(&[9; 100]);
+        let sigs = [
+            Vec::new(),
+            Vec::from([0x51]),
+            long_push,
+            Vec::from([0x6a]), // OP_RETURN, so the sig is not push-only
+            Vec::from([0x4c]),
+            Vec::from([0xff; 40]),
+        ];
+        for sig in sigs {
+            for flags in [
+                Flags::PqOutputs,
+                Flags::PqOutputs | Flags::SigPushOnly,
+                Flags::PqOutputs | Flags::P2SH | Flags::CleanStack,
+                Flags::all(),
+            ] {
+                assert_eq!(
+                    eval_full(sig.clone(), namespace_script(1), flags),
+                    Err((script::ComponentType::PubKey, script::Error::PqNamespace)),
+                    "sig {sig:?} with flags {flags:?} was not refused"
+                );
+            }
+        }
+    }
+
+    /// A script that is not byte-exact is not in the namespace, so setting the flag changes
+    /// nothing about it. The non-minimal push matters most: it encodes the same commitment
+    /// in thirty-six bytes, and an output has to be byte-exact to be recognized.
+    #[test]
+    fn the_flag_changes_nothing_for_a_near_miss() {
+        let canonical = namespace_script(1);
+        let mut shorter = Vec::from([0x00, 0x20]);
+        shorter.extend_from_slice(&COMMITMENT);
+        let mut non_minimal = Vec::from([0x00, 0x51, 0x4c, 0x20]);
+        non_minimal.extend_from_slice(&COMMITMENT);
+        let mut trailing = canonical.clone();
+        trailing.push(0x00);
+        let mut scheme_is_op_0 = canonical.clone();
+        scheme_is_op_0[1] = 0x00;
+        let mut scheme_is_reserved = canonical.clone();
+        scheme_is_reserved[1] = 0x50;
+        let mut scheme_is_nop = canonical.clone();
+        scheme_is_nop[1] = 0x61;
+        let mut short_push = canonical.clone();
+        short_push[2] = 0x1f;
+        let mut long_push_opcode = canonical.clone();
+        long_push_opcode[2] = 0x21;
+
+        for near_miss in [
+            shorter,
+            non_minimal,
+            trailing,
+            scheme_is_op_0,
+            scheme_is_reserved,
+            scheme_is_nop,
+            short_push,
+            long_push_opcode,
+            Vec::new(),
+            canonical[..canonical.len() - 1].to_vec(),
+        ] {
+            assert!(
+                !script::is_pq_namespace(&near_miss),
+                "unexpectedly in the namespace: {near_miss:?}"
+            );
+            assert_eq!(
+                eval(Vec::new(), near_miss.clone(), Flags::P2SH),
+                eval(
+                    Vec::new(),
+                    near_miss.clone(),
+                    Flags::P2SH | Flags::PqOutputs
+                ),
+                "the flag changed the result for {near_miss:?}"
+            );
+        }
+    }
+
+    /// A namespace script wrapped in P2SH is refused too, so the rule is simply that this
+    /// evaluator never runs one. Without the flag it is satisfied by no arguments at all,
+    /// which is the trap of treating a P2SH-wrapped PQ script as PQ-protected.
+    #[test]
+    fn the_flag_refuses_a_namespace_redeem_script_under_p2sh() {
+        let redeem = namespace_script(1);
+        let hash = Ripemd160::digest(Sha256::digest(&redeem));
+        let mut pub_key = Vec::from([0xa9u8, 0x14]); // OP_HASH160, push 20
+        pub_key.extend_from_slice(&hash);
+        pub_key.push(0x87); // OP_EQUAL
+
+        let mut sig = Vec::from([redeem.len() as u8]);
+        sig.extend_from_slice(&redeem);
+
+        assert_eq!(eval(sig.clone(), pub_key.clone(), Flags::P2SH), Ok(true));
+        assert_eq!(
+            eval_full(sig, pub_key, Flags::P2SH | Flags::PqOutputs),
+            Err((script::ComponentType::Redeem, script::Error::PqNamespace))
+        );
+    }
+
+    /// Both two-component entry points funnel through the guard, so the typed one is
+    /// refused as well as the raw one.
+    #[test]
+    fn the_typed_entry_point_is_guarded_too() {
+        let pub_key = Code(namespace_script(1)).to_component().unwrap();
+        let sig = Code(Vec::new()).to_component().unwrap();
+        let script = crate::Script { sig, pub_key };
+        assert_eq!(
+            script.eval(Flags::PqOutputs, &NullSignatureChecker()),
+            Err((script::ComponentType::PubKey, script::Error::PqNamespace))
+        );
+        assert_eq!(
+            script.eval(Flags::empty(), &NullSignatureChecker()),
+            Ok(true)
+        );
+    }
+
+    /// A namespace script in any format, with any commitment length.
+    fn shaped(format: u8, scheme: u8, commitment: usize) -> Vec<u8> {
+        let mut script = vec![format, scheme, commitment as u8];
+        script.resize(3 + commitment, 7);
+        script
+    }
+
+    /// The predicate itself, independent of any evaluation.
+    #[test]
+    fn is_pq_namespace_accepts_exactly_the_namespace() {
+        assert_eq!(script::PQ_NAMESPACE_MIN_BYTES, 4);
+        assert_eq!(script::PQ_NAMESPACE_MAX_BYTES, 78);
+        // Format 0's defined schemes, the shape an output actually takes today.
+        for scheme in 1..=16u8 {
+            let script = namespace_script(scheme);
+            assert_eq!(script.len(), 35);
+            assert!(script::is_pq_namespace(&script));
+            assert!(Code(script).is_pq_namespace());
+        }
+        // Every format and scheme pair, at every commitment length a direct push can carry.
+        // The namespace answers for all of them so that one nothing defines is restricted
+        // rather than spendable, including the formats this code has no rules for at all.
+        for format in [0x00u8, 0x51, 0x58, 0x60] {
+            for scheme in [0x51u8, 0x52, 0x53, 0x60] {
+                for commitment in [1usize, 20, 32, 48, 0x4b] {
+                    let script = shaped(format, scheme, commitment);
+                    assert_eq!(script.len(), 3 + commitment);
+                    assert!(
+                        script::is_pq_namespace(&script),
+                        "format {format:#04x} scheme {scheme:#04x} commitment {commitment}"
+                    );
+                }
+            }
+        }
+        // The boundaries of each byte's range.
+        for format in [0x01u8, 0x4f, 0x50, 0x61] {
+            assert!(!script::is_pq_namespace(&shaped(format, 0x51, 32)));
+        }
+        // A format byte is a valid scheme byte but not the reverse: `OP_0` names format 0,
+        // and in byte 1 it would be the format twice over rather than a scheme.
+        for scheme in [0x00u8, 0x4f, 0x50, 0x61] {
+            assert!(!script::is_pq_namespace(&shaped(0x00, scheme, 32)));
+        }
+        // Only a direct push carries the commitment. `OP_0`, `OP_1NEGATE`, the small
+        // integers and the `OP_PUSHDATA` opcodes are all outside byte 2's range.
+        for push in [0x00u8, 0x4c, 0x4d, 0x4e, 0x4f, 0x51, 0x60] {
+            let mut script = shaped(0x00, 0x51, 32);
+            script[2] = push;
+            assert!(!script::is_pq_namespace(&script));
+        }
+        // The push has to run exactly to the end: nothing after it, and nothing missing.
+        let canonical = shaped(0x00, 0x51, 32);
+        let mut trailing = canonical.clone();
+        trailing.push(7);
+        assert!(!script::is_pq_namespace(&trailing));
+        assert!(!script::is_pq_namespace(&canonical[..canonical.len() - 1]));
+        // Too short to hold a header, let alone a commitment.
+        for length in 0..script::PQ_NAMESPACE_MIN_BYTES {
+            assert!(!script::is_pq_namespace(&shaped(0x00, 0x51, 1)[..length]));
+        }
     }
 }

@@ -74,6 +74,16 @@ pub enum Error {
     #[error("public key type error")]
     PubKeyType,
 
+    /// PQ encodings have a fixed signature size.
+    #[cfg(feature = "pq")]
+    #[error("invalid PQ signature length")]
+    PqSignatureSize,
+
+    /// The PQ evaluator bounds bytes as well as the legacy item count.
+    #[cfg(feature = "pq")]
+    #[error("PQ script stack byte limit exceeded")]
+    StackBytes,
+
     // softfork safeness
     #[error("discouraged upgradable NOP encountered")]
     DiscourageUpgradableNOPs,
@@ -178,11 +188,55 @@ bitflags::bitflags! {
         ///
         /// See [BIP65](https://github.com/bitcoin/bips/blob/master/bip-0065.mediawiki) for details.
         const CHECKLOCKTIMEVERIFY = 1 << 9;
+
+        /// Refuse to evaluate a script in the post-quantum output namespace, which is
+        /// exactly thirty-five bytes of `OP_0 <OP_1..OP_16> 0x20 <32 bytes>`; see
+        /// [`crate::script::is_pq_namespace`].
+        ///
+        /// Such a script is three pushes, so under legacy rules it leaves the truthy
+        /// thirty-two-byte commitment on top of the stack and is satisfied by an *empty*
+        /// scriptSig. It is spendable only under the post-quantum rules, which this
+        /// evaluator does not implement, so evaluating it here would hand the output to
+        /// anyone. With this flag set the evaluator returns
+        /// [`crate::script::Error::PqNamespace`] instead, both for a `scriptPubKey` and for
+        /// a P2SH redeem script, and for every shape in the namespace whether or not
+        /// anything defines it.
+        ///
+        /// Note: this must be set uniformly once the post-quantum rules activate. Setting
+        /// it for some inputs and not others makes the same output spendable or not
+        /// depending on the verifier. `CleanStack` happens to reject these scripts too, but
+        /// it is a policy flag with no guarantee of being set and is not a substitute. This
+        /// flag also only covers the two-component entry points; code that evaluates a
+        /// script component directly is not protected by it.
+        ///
+        /// Note: this bit is `SCRIPT_VERIFY_CHECKSEQUENCEVERIFY` in Bitcoin Core, which
+        /// Zcash does not implement. Where it was previously unknown and rejected by
+        /// [`Flags::from_bits`], a caller forwarding a Bitcoin-derived flag integer will now
+        /// set this rule instead of erroring. The direction is safe — it refuses to
+        /// evaluate rather than accepting — but a boundary that forwards raw script flags
+        /// should mask the bits it does not mean.
+        const PqOutputs = 1 << 10;
     }
 }
 
 /// This verifies that a signature is correct for the given pubkey and script code.
 pub trait SignatureChecker {
+    /// Decode and check a signature argument under this checker's rules.
+    ///
+    /// The default preserves legacy ECDSA decoding, encoding errors, and verification
+    /// order. Alternative implementations must be selected by trusted validation
+    /// context, never by script arguments. This does not select parsing limits or
+    /// activate a new output type.
+    fn check_signature(
+        &self,
+        signature: &[u8],
+        public_key: &[u8],
+        flags: Flags,
+        script_code: &script::Code,
+    ) -> Result<bool, Error> {
+        crate::opcode::Operation::is_sig_valid(signature, public_key, flags, script_code, self)
+    }
+
     /// Check that the signature is valid.
     fn check_sig(
         &self,
@@ -431,6 +485,15 @@ impl State {
     /// Extract the altstack from the state.
     pub(crate) fn altstack(&self) -> &Stack<Vec<u8>> {
         &self.altstack
+    }
+
+    #[cfg(feature = "pq")]
+    pub(crate) fn check_stack_bytes(&self, limit: usize) -> Result<(), Error> {
+        let mut remaining = limit;
+        for item in self.stack.iter().chain(self.altstack.iter()) {
+            remaining = remaining.checked_sub(item.len()).ok_or(Error::StackBytes)?;
+        }
+        Ok(())
     }
 }
 

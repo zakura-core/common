@@ -53,6 +53,13 @@ pub enum Error {
 
     #[error("clean stack requirement not met")]
     CleanStack,
+
+    /// The script is in the post-quantum output namespace, which the legacy evaluator
+    /// refuses to run when [`interpreter::Flags::PqOutputs`] is set. Evaluating it would
+    /// satisfy it with an empty scriptSig; it is spendable only under the post-quantum
+    /// rules, which this evaluator does not implement.
+    #[error("post-quantum namespace script cannot be spent under legacy script rules")]
+    PqNamespace,
 }
 
 impl Error {
@@ -252,6 +259,7 @@ impl<T: Into<opcode::PossiblyBad> + opcode::Evaluable + Clone> Evaluable for Com
                 &Code(self.to_bytes()),
                 stack,
                 checker,
+                iter::AdditionalStackByteLimit::None,
             ),
             n => Err(Error::ScriptSize(Some(n))),
         }
@@ -396,6 +404,60 @@ impl Code {
         self.parse().next() == Some(Ok(opcode::PossiblyBad::Good(op::RETURN)))
             || self.0.len() > Self::MAX_SIZE
     }
+
+    /// Whether this script is in the post-quantum output namespace.
+    ///
+    /// A convenience forwarder to [`is_pq_namespace`], which is the definition.
+    pub fn is_pq_namespace(&self) -> bool {
+        is_pq_namespace(&self.0)
+    }
+}
+
+/// The three header bytes of a script in the post-quantum output namespace: the format
+/// opcode, the scheme opcode, and the commitment's push opcode.
+pub const PQ_NAMESPACE_HEADER_BYTES: usize = 3;
+
+/// The shortest script the namespace can hold: the header and a one-byte commitment.
+pub const PQ_NAMESPACE_MIN_BYTES: usize = PQ_NAMESPACE_HEADER_BYTES + 1;
+
+/// The longest: the header and the largest commitment a direct push can carry.
+pub const PQ_NAMESPACE_MAX_BYTES: usize = PQ_NAMESPACE_HEADER_BYTES + 0x4b;
+
+/// Whether `script` is in the post-quantum output namespace, which is a format opcode, a
+/// scheme opcode, and a single direct push that runs to the end of the script:
+///
+/// * byte 0 is `OP_0` or `OP_1`..`OP_16` (`0x00`, or `0x51`..`0x60`), the *format*, which
+///   fixes the commitment's hash and length and the rules a spend is checked under;
+/// * byte 1 is `OP_1`..`OP_16` (`0x51`..`0x60`), the *scheme* within that format;
+/// * byte 2 is a direct push opcode (`0x01`..`0x4b`) and exactly that many bytes follow it,
+///   with nothing after them.
+///
+/// So a script here is [`PQ_NAMESPACE_MIN_BYTES`] to [`PQ_NAMESPACE_MAX_BYTES`] long, and
+/// format 0's defined schemes are the thirty-five-byte `OP_0 <OP_1|OP_2> 0x20 <32 bytes>`.
+///
+/// This is the *namespace*, not the set of format and scheme pairs anything defines. It
+/// answers for every pair and every commitment length on purpose, so that an undefined pair,
+/// or a length wrong for its format, is restricted rather than left spendable under the
+/// legacy rules. The whole shape has to be claimed before the rules activate: these scripts
+/// are satisfied by an empty scriptSig today, so a shape left unclaimed cannot be restricted
+/// later without a second consensus change over whatever has accumulated in it meanwhile.
+///
+/// The test is on bytes rather than on parsed opcodes on purpose. An output has to be
+/// byte-exact to be recognized by the post-quantum rules, so a non-minimal push of a
+/// commitment (`OP_0 OP_1 OP_PUSHDATA1 0x20 <32 bytes>`) has `OP_PUSHDATA1` in byte 2 rather
+/// than a direct push and is correctly not in the namespace, and neither is any other near
+/// miss. Keeping one byte-level definition also means the rule that refuses to evaluate
+/// these scripts and the rule that recognizes them cannot disagree.
+pub fn is_pq_namespace(script: &[u8]) -> bool {
+    let (Some(&format), Some(&scheme), Some(&push)) =
+        (script.first(), script.get(1), script.get(2))
+    else {
+        return false;
+    };
+    matches!(format, 0x00 | 0x51..=0x60)
+        && matches!(scheme, 0x51..=0x60)
+        && matches!(push, 0x01..=0x4b)
+        && script.len() == PQ_NAMESPACE_HEADER_BYTES + usize::from(push)
 }
 
 impl Evaluable for Code {
@@ -422,6 +484,7 @@ impl Evaluable for Code {
                 self,
                 stack,
                 checker,
+                iter::AdditionalStackByteLimit::None,
             ),
             n => Err(Error::ScriptSize(Some(n))),
         }

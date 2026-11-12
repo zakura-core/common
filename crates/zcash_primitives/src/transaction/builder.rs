@@ -1316,6 +1316,20 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
         self.transparent_builder.add_output(to, value)
     }
 
+    /// Adds a post-quantum output committing to `commitment` under `parameters`.
+    ///
+    /// See [`transparent::builder::TransparentBuilder::add_pq_output`].
+    #[cfg(feature = "pq")]
+    pub fn add_transparent_pq_output(
+        &mut self,
+        parameters: transparent::pq::ParameterSet,
+        commitment: &[u8; 32],
+        value: Zatoshis,
+    ) -> Result<(), transparent::builder::Error> {
+        self.transparent_builder
+            .add_pq_output(parameters, commitment, value)
+    }
+
     /// Adds a transparent "null data" (OP_RETURN) output with the given data payload.
     pub fn add_transparent_null_data_output<FE>(&mut self, data: &[u8]) -> Result<(), Error<FE>> {
         self.transparent_builder
