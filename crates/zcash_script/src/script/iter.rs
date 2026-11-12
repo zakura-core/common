@@ -81,17 +81,49 @@ pub fn eval_script<T: script::Evaluable, U: script::Evaluable>(
     }
 }
 
+/// Additional stack-payload accounting; opcode stack-depth limits always apply.
+/// This bounds stack memory when large PQ signatures are duplicated or moved
+/// between stacks. The abstraction is kept general for possible future uses
+/// that need an additional stack-byte limit.
+pub(crate) enum AdditionalStackByteLimit {
+    None,
+    #[cfg(feature = "pq")]
+    Limited(usize),
+}
+
+impl AdditionalStackByteLimit {
+    fn check(&self, _state: &interpreter::State) -> Result<(), interpreter::Error> {
+        match self {
+            Self::None => Ok(()),
+            #[cfg(feature = "pq")]
+            Self::Limited(limit) => _state.check_stack_bytes(*limit),
+        }
+    }
+}
+
+/// Executes parsed instructions with the caller's verifier and stack-byte rule.
+/// Parsing limits and final spending conditions remain with the calling path.
 pub fn eval<T: Into<opcode::PossiblyBad> + opcode::Evaluable + Clone>(
     mut iter: impl Iterator<Item = Result<T, script::Error>>,
     flags: interpreter::Flags,
     script_code: &script::Code,
     stack: interpreter::Stack<Vec<u8>>,
     checker: &dyn interpreter::SignatureChecker,
+    additional_stack_byte_limit: AdditionalStackByteLimit,
 ) -> Result<interpreter::Stack<Vec<u8>>, script::Error> {
-    iter.try_fold(interpreter::State::initial(stack), |state, elem| {
+    let initial_state = interpreter::State::initial(stack);
+    additional_stack_byte_limit
+        .check(&initial_state)
+        .map_err(|e| script::Error::Interpreter(None, e))?;
+    iter.try_fold(initial_state, |state, elem| {
         elem.and_then(|op| {
-            op.eval(flags, script_code, checker, state)
-                .map_err(|e| script::Error::Interpreter(Some(op.clone().into()), e))
+            let state = op
+                .eval(flags, script_code, checker, state)
+                .map_err(|e| script::Error::Interpreter(Some(op.clone().into()), e))?;
+            additional_stack_byte_limit
+                .check(&state)
+                .map_err(|e| script::Error::Interpreter(Some(op.into()), e))?;
+            Ok(state)
         })
     })
     .and_then(|final_state| match final_state.vexec.len() {

@@ -1,4 +1,58 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.const-oid]]
+who = "Codex (AI-assisted source review)"
+criteria = "safe-to-deploy"
+version = "0.10.2"
+notes = """
+Reviewed the exact published package and verified its archive checksum and packaged source against Cargo.lock. No build script, FFI, network, process or filesystem capability. The sole unsafe conversion in ObjectIdentifierRef::from_bytes_unchecked preserves lifetime, slice metadata and alignment through a repr(transparent) byte-slice newtype. Public decoding validates arcs first; inspected bounded arc decoding and generated static OID data. AI-assisted source safety review for cargo-vet, not an independent cryptographic or ASN.1 correctness audit.
+"""
+
+[[audits.der]]
+who = "Codex (AI-assisted source review)"
+criteria = "safe-to-deploy"
+version = "0.8.3"
+notes = """
+Reviewed exact published source and verified its archive checksum and packaged files against Cargo.lock. No build script, network, process execution or hidden filesystem access. Reviewed all four unsafe conversions in bytes.rs, string.rs, asn1/sequence.rs and asn1/octet_string.rs: each casts a borrowed repr(transparent) slice/string wrapper without changing lifetime, alignment or metadata. Inspected checked slice-reader lengths and explicit std file helpers. File paths are caller supplied; existing-file permissions/symlinks remain caller responsibilities and non-Unix secret-file permissions are not hardened. These file helpers are not used by Common PQ validation. AI-assisted cargo-vet safety review; not a complete ASN.1 correctness audit.
+"""
+
+[[audits.pkcs8]]
+who = "Codex (AI-assisted source review)"
+criteria = "safe-to-deploy"
+version = "0.11.0"
+notes = """
+Reviewed exact published source and verified its archive checksum and packaged files against Cargo.lock. Forbids unsafe code; no build script, FFI, network or subprocess capability. Inspected DER/PEM encode/decode traits, private-key containers, feature-gated encryption/randomness and file helpers. Filesystem operations are explicit caller-requested paths delegated to der; randomness is explicitly requested through the configured provider. File-permission caveats of der still apply. Common PQ validation does not use these key-file APIs. AI-assisted cargo-vet source safety review, not a cryptographic audit of PKCS8 encryption.
+"""
+
+[[audits.sha3]]
+who = "Codex (AI-assisted source review)"
+criteria = "safe-to-deploy"
+version = "0.11.0"
+notes = """
+AI-assisted source safety review of the exact published package; archive checksum matched Cargo.lock and registry metadata, and packaged files matched inspected source. Reviewed all production source, buffer/fixed-output/XOF wrappers and feature paths. Forbids unsafe code and has no build script or hidden filesystem/network/process access. Permutations are delegated to the separately assessed keccak dependency; this entry does not certify that dependency or resolve its AArch64 dispatch concern. Not an independent cryptographic audit.
+"""
+
+[[audits.signature]]
+who = "Codex (AI-assisted source review)"
+criteria = "safe-to-deploy"
+version = "3.0.0"
+notes = """
+AI-assisted source safety review of the exact published package; archive checksum matched Cargo.lock and registry metadata, and packaged files matched inspected source. Reviewed production traits, errors, RNG adapters, encoding and feature paths; forbids unsafe code, has no build script or hidden filesystem/network/process access. Caller-provided implementations and RNG determine cryptographic behavior. This is cargo-vet capability/unsafe review, not independent cryptographic or side-channel certification.
+"""
+
+[[audits.slh-dsa]]
+who = "Codex (AI-assisted source review)"
+criteria = "safe-to-deploy"
+version = "0.2.0-rc.5"
+notes = """
+AI-assisted cargo-vet source safety review, not an independent cryptographic or FIPS certification. Exact package archive checksum matched Cargo.lock and registry metadata; packaged files matched reviewed source. Reviewed manifests/features and production source: no build script, hidden filesystem/network/process access or handwritten unsafe; zerocopy address layouts are fixed repr(C) integer-byte fields, parsers check exact lengths, context length is bounded to u8, and allocation/recursion follows fixed parameter sets. Discretion: upstream SigningKey Debug prints secret seed fields, PartialEq compares them without constant-time guarantees, and wrong-length caller-provided opt_rand can panic. Common keeps the upstream key in a private wrapper with no Debug/Eq/Deref/export, takes fixed-length seeds, passes None for opt_rand, and bounds key/signature/context lengths before verification. Approval relies on those upstream hazards remaining unexposed; zeroization of stored seeds is not a claim that all temporary copies are erased.
+"""
+
+[[audits.spki]]
+who = "Codex (AI-assisted source review)"
+criteria = "safe-to-deploy"
+version = "0.8.1"
+notes = """
+Reviewed exact published source and verified its archive checksum and packaged files against Cargo.lock. Forbids unsafe code and has no build script, FFI, network or subprocess capability. Inspected SubjectPublicKeyInfo and AlgorithmIdentifier parsing, fingerprinting and encode/decode traits. std file access is only through explicit caller-selected file methods delegated to der. AI-assisted source safety review for cargo-vet; does not claim independent cryptographic or ASN.1 correctness qualification.
+"""
