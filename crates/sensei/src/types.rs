@@ -337,36 +337,47 @@ pub struct VerificationRequest<'a> {
     pub(crate) statements: &'a [PublicStatement],
     pub(crate) proof: &'a [u8],
 }
-/// What one verification batch shape retains in the verifier's idle scratch
-/// pools, as provisioned by [`crate::warm_up_verifier_scratch`].
+/// The scratch [`crate::warm_up_verifier_scratch`] provisioned for one
+/// verification batch shape, and the idle scratch cache's limits.
 ///
-/// The byte figures measure the entries the warm-up provisions: one final-MSM
-/// workspace and one equation entry per proof-folding chunk. Merging a
-/// multi-chunk batch then grows one of those entries to hold all of the
-/// batch's transcript points, which neither the figures nor `retained`
-/// count; `max_idle_bytes` bounds the pools either way.
+/// The byte figures measure the entries one warm-up call provisions: one
+/// final-MSM workspace and one equation entry per proof-folding chunk. Merging
+/// a multi-chunk batch then grows one of those entries to hold all of the
+/// batch's transcript points, which neither the figures nor
+/// `retention_eligible` count.
+///
+/// This describes cache policy and what one call prepared. It is not a
+/// reservation: it does not report the cache's current occupancy, promise
+/// that a later call finds scratch for its shape, or bound the memory of
+/// active verification calls.
 #[cfg(feature = "verifier")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct VerificationPlan {
-    /// Retained capacity in bytes of the final-MSM workspace provisioned for
-    /// the shape. A concurrent call beyond `pooled_batches` allocates about
-    /// this much and discards it afterwards.
+    /// Capacity in bytes of the one final-MSM workspace provisioned for the
+    /// shape. A verification call that finds no idle workspace allocates
+    /// about this much for the same shape.
     pub workspace_bytes: usize,
-    /// Total retained capacity in bytes of the per-chunk equation entries
-    /// provisioned for the shape.
+    /// Total capacity in bytes of the per-chunk equation entries provisioned
+    /// for the shape.
     pub equation_bytes: usize,
-    /// Batches the idle pools serve concurrently without allocating a
-    /// final-MSM workspace, the largest piece of scratch: an upper bound for
-    /// admission control, not a target. Equation entries are pooled
-    /// separately, and concurrent batches may allocate some of them.
-    pub pooled_batches: usize,
-    /// Whether every provisioned entry fits its retention ceiling and was
-    /// kept. `false` means this shape reallocates its scratch on every call.
-    pub retained: bool,
-    /// Upper bound on the idle scratch the pools retain in total, in bytes
-    /// (slot counts times per-entry ceilings, both pools) for this worker
-    /// budget.
+    /// How many final-MSM workspaces the idle cache can hold for this worker
+    /// budget. This is a capacity, independent of how many workspaces are
+    /// idle now or what shapes they were sized for: warm-up provisions one.
+    /// Equation entries are cached separately.
+    pub workspace_slots: usize,
+    /// Whether the provisioned entries pass the cache's retention checks:
+    /// each within its per-entry capacity ceiling, and no more equation
+    /// entries than equation slots. `false` means this shape's scratch is
+    /// not all cached between calls. `true` does not mean the entries were
+    /// inserted or are still idle: concurrent calls can fill the cache
+    /// first, or lease the entries afterwards.
+    pub retention_eligible: bool,
+    /// Upper bound in bytes on the accounted capacities of idle cached
+    /// scratch (slot counts times per-entry ceilings, both pools) for this
+    /// worker budget. It excludes scratch leased by active calls, prepared
+    /// verifier and SRS state, worker stacks, allocator overhead, and all
+    /// other process memory, so it is not a bound on resident memory.
     pub max_idle_bytes: usize,
 }
 

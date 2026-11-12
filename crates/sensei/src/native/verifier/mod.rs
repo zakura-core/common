@@ -51,7 +51,7 @@
 //! [`RandomSource`] stays on that thread, allowing reentrant callbacks, and only
 //! the weights reach workers. Task budgets follow the work: [`fold_jobs`] cuts
 //! at most one chunk per [`tuning::VERIFY_FOLD_MIN_ACTIONS`] Actions (within
-//! [`tuning::VERIFY_FOLD_TASK_CAP`] and the proof count), and a single-chunk
+//! the pool's budget and the proof count), and a single-chunk
 //! batch folds on the calling thread without the pool scheduler. Each chunk
 //! leases its [`Equation`] from the runtime's bounded scratch pool; instance
 //! commitments walk the runtime's fixed-base generator bank, so chunk folding
@@ -64,13 +64,15 @@
 //!
 //! [`VerifierScratch`] owns both pools, with slot counts
 //! [`tuning::verifier_equation_slots`] and [`tuning::verifier_workspace_slots`]
-//! derive from the pool's budgets: equations and final-MSM workspaces are
-//! returned after success and after reported errors, and dropped instead when
-//! a pool is full or an entry's retained capacity exceeds its tuning ceiling,
-//! so idle verifier memory never exceeds the slot × ceiling bound that
-//! [`warm_up_verifier_scratch`] reports in its [`VerificationPlan`]. Unwinding
-//! drops the active scratch without returning it. Concurrent calls beyond the
-//! slot counts fall back to fresh, discarded allocations.
+//! derive from the pool's budget: a lease that finds its pool empty allocates,
+//! and equations and final-MSM workspaces are returned after success and after
+//! reported errors, and dropped instead when a pool is full or an entry's
+//! retained capacity exceeds its tuning ceiling. The accounted capacity of
+//! idle scratch therefore never exceeds the slot × ceiling bound that
+//! [`warm_up_verifier_scratch`] reports in its [`VerificationPlan`]; scratch
+//! leased by active calls is outside that bound. Unwinding drops the active
+//! scratch without returning it. A workspace is leased only for the final
+//! MSM, so overlapping calls can reuse one slot at different times.
 
 use super::{
     commitment::{FixedGenerator, MsmWorkspace},
@@ -337,9 +339,7 @@ impl VerifierRuntime {
             codebook,
             executor,
             scratch: VerifierScratch::new(
-                tuning::verifier_equation_slots(
-                    executor.budget_capped(tuning::VERIFY_FOLD_TASK_CAP).get(),
-                ),
+                tuning::verifier_equation_slots(executor.budget().get()),
                 tuning::verifier_workspace_slots(executor.budget().get()),
             ),
         }
@@ -476,10 +476,7 @@ impl VerifierRuntime {
         })
     }
     fn msm_budget(&self, dynamic_points: usize) -> TaskBudget {
-        let cap = self
-            .executor
-            .budget_capped(tuning::VERIFY_MSM_TASK_CAP)
-            .get();
+        let cap = self.executor.budget().get();
         #[cfg(not(test))]
         let tasks = msm_tasks(cap, dynamic_points);
         #[cfg(test)]
@@ -491,10 +488,7 @@ impl VerifierRuntime {
         TaskBudget::new(tasks).expect("nonzero task floor")
     }
     fn fold_cap(&self) -> usize {
-        let cap = self
-            .executor
-            .budget_capped(tuning::VERIFY_FOLD_TASK_CAP)
-            .get();
+        let cap = self.executor.budget().get();
         #[cfg(test)]
         let cap = bench_override("SENSEI_BENCH_FOLD_CAP", cap);
         cap
@@ -506,7 +500,7 @@ impl VerifierRuntime {
 const FIXED_INPUTS: usize = 3;
 
 /// Final-MSM task budget: one task per [`tuning::VERIFY_MSM_MIN_TERMS`] of the
-/// equation's terms, within the capped pool budget. The fixed segments are the
+/// equation's terms, within the pool budget `cap`. The fixed segments are the
 /// coefficient SRS, deduplicated verifying-key bank, and instance Lagrange
 /// bases; `dynamic_points` counts the batch's transcript commitments.
 fn msm_tasks(cap: usize, dynamic_points: usize) -> usize {
@@ -532,14 +526,14 @@ fn slice_len(budget: usize, dynamic_points: usize) -> usize {
 }
 
 /// Fold-chunk budget: one chunk per [`tuning::VERIFY_FOLD_MIN_ACTIONS`]
-/// Actions of folding work, never more than the proofs or the capped pool
-/// allow. A single-chunk batch folds on the calling thread.
+/// Actions of folding work, never more than the proofs or the pool budget
+/// `cap` allow. A single-chunk batch folds on the calling thread.
 fn fold_jobs(cap: usize, proofs: usize, actions: usize) -> usize {
     (actions / tuning::VERIFY_FOLD_MIN_ACTIONS).clamp(1, cap.max(1).min(proofs.max(1)))
 }
 
-/// A benchmark's environment override of a resolved task cap, for sweeping
-/// caps without rebuilding; the pool still bounds the result.
+/// A benchmark's environment override lowering a pool budget to a task cap,
+/// for sweeping caps without rebuilding; the pool still bounds the result.
 #[cfg(test)]
 fn bench_override(name: &str, resolved: usize) -> usize {
     bench_setting(name, resolved).clamp(1, resolved.max(1))
@@ -557,19 +551,22 @@ pub(crate) fn warm_up_verifier() {
     let _ = VerifierRuntime::get();
 }
 
-/// Provisions the bounded idle scratch pools for an expected batch shape and
+/// Provisions one batch's scratch for an expected shape — its chunk equations
+/// and one final-MSM workspace — offers it to the bounded idle pools, and
 /// reports its plan; the public [`crate::warm_up_verifier_scratch`] contract
 /// describes the sizing. The plan's bytes are measured on the entries just
-/// provisioned: `verify` leases the same entries for the shape, then grows
-/// one of them to the whole batch when it merges the chunks.
+/// provisioned: an uncontended `verify` leases the same entries for the
+/// shape, then grows one of them to the whole batch when it merges the
+/// chunks. `retention_eligible` evaluates the pools' size and slot checks on
+/// those entries; it does not observe whether each return found a free slot.
 pub(crate) fn warm_up_verifier_scratch(proofs: usize, actions: usize) -> VerificationPlan {
     let runtime = VerifierRuntime::get();
     let scratch = &runtime.scratch;
     let mut plan = VerificationPlan {
         workspace_bytes: 0,
         equation_bytes: 0,
-        pooled_batches: scratch.workspace_slots,
-        retained: true,
+        workspace_slots: scratch.workspace_slots,
+        retention_eligible: true,
         max_idle_bytes: scratch.max_idle_bytes(),
     };
     if proofs == 0 {
@@ -589,17 +586,17 @@ pub(crate) fn warm_up_verifier_scratch(proofs: usize, actions: usize) -> Verific
         equation.points.reserve(chunk_points);
         equation.scalars.reserve(chunk_points);
     }
-    plan.retained &= jobs <= scratch.equation_slots;
+    plan.retention_eligible &= jobs <= scratch.equation_slots;
     for equation in equations {
         let bytes = equation.retained_bytes();
         plan.equation_bytes += bytes;
-        plan.retained &= bytes <= tuning::VERIFIER_EQUATION_MAX_BYTES;
+        plan.retention_eligible &= bytes <= tuning::VERIFIER_EQUATION_MAX_BYTES;
         scratch.return_equation(equation);
     }
     let mut workspace = scratch.lease_workspace();
     runtime.provision_workspace(&mut workspace, per_proof * proofs);
     plan.workspace_bytes = workspace.retained_bytes();
-    plan.retained &= plan.workspace_bytes <= tuning::VERIFIER_WORKSPACE_MAX_BYTES;
+    plan.retention_eligible &= plan.workspace_bytes <= tuning::VERIFIER_WORKSPACE_MAX_BYTES;
     scratch.return_workspace(workspace);
     plan
 }

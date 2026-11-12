@@ -19,7 +19,7 @@
 //! selecting Rayon's global pool. The executor owns neither circuit data nor
 //! request scratch and receives no caller RNG: proof APIs sample on the calling
 //! thread before entering it for proof work.
-use crate::{WorkersConfigError, tuning::TaskCap};
+use crate::WorkersConfigError;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use udon::exec::{Executor, SerialExecutor, TaskBudget};
 
@@ -136,18 +136,6 @@ impl PoolExecutor {
         }
         TaskBudget::SERIAL
     }
-
-    /// The full budget bounded by one operation's task cap from [`crate::tuning`].
-    ///
-    /// A zero fixed cap is treated as one task: caps limit concurrency, never
-    /// admission.
-    pub(crate) fn budget_capped(&self, cap: TaskCap) -> TaskBudget {
-        let limit = match cap {
-            TaskCap::Pool => usize::MAX,
-            TaskCap::Fixed(tasks) => tasks,
-        };
-        TaskBudget::new(self.budget().get().min(limit.max(1))).expect("nonzero capped budget")
-    }
 }
 
 impl PoolExecutor {
@@ -227,25 +215,6 @@ mod tests {
         assert_eq!(resolve_workers(None, Some(""), 16), 16);
         assert_eq!(resolve_workers(None, Some("-2"), 16), 16);
         assert_eq!(resolve_workers(None, None, 16), 16);
-    }
-
-    #[test]
-    fn capped_budgets_stay_within_the_pool_and_never_hit_zero() {
-        let serial = PoolExecutor { pool: None };
-        assert_eq!(serial.budget_capped(TaskCap::Pool), TaskBudget::SERIAL);
-        assert_eq!(serial.budget_capped(TaskCap::Fixed(0)), TaskBudget::SERIAL);
-        let executor = PoolExecutor {
-            pool: Some(
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(4)
-                    .build()
-                    .unwrap(),
-            ),
-        };
-        assert_eq!(executor.budget_capped(TaskCap::Pool).get(), 4);
-        assert_eq!(executor.budget_capped(TaskCap::Fixed(2)).get(), 2);
-        assert_eq!(executor.budget_capped(TaskCap::Fixed(0)).get(), 1);
-        assert_eq!(executor.budget_capped(TaskCap::Fixed(9)).get(), 4);
     }
 
     #[test]

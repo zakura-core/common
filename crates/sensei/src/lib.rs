@@ -19,8 +19,8 @@
 //! proving, and never initializes the prover's circuit state. The first nonempty
 //! `verify_proofs` call prepares the verifier on demand; `warm_up_verifier`
 //! can do this eagerly, and `warm_up_verifier_scratch` can additionally
-//! provision verification scratch for an expected batch shape and report its
-//! `VerificationPlan` for admission control. Warming either role prepares the
+//! provision verification scratch for an expected batch shape, reporting what
+//! it provisioned in a `VerificationPlan`. Warming either role prepares the
 //! shared SRS once; warming the other then prepares only its remaining state.
 //! `warm_up` warms both roles.
 //! Each verification request selects its `CircuitVersion`; batches may mix
@@ -269,11 +269,9 @@ pub fn configure_workers(workers: usize) -> Result<(), WorkersConfigError> {
 /// but neither proof role's preparation — if needed.
 ///
 /// After this returns, [`configure_workers`] reports
-/// [`WorkersConfigError::AlreadyInitialized`]. Admission control can combine
-/// this budget with a batch shape's `VerificationPlan` (from
-/// `warm_up_verifier_scratch`, with the `verifier` feature) when bounding
-/// concurrent verification. Without the `multicore` feature this is always
-/// one.
+/// [`WorkersConfigError::AlreadyInitialized`]. This is the private pool's
+/// size (one if the pool could not be built), not a limit on the process's
+/// other threads. Without the `multicore` feature this is always one.
 #[cfg(any(feature = "prover", feature = "verifier"))]
 pub fn worker_budget() -> usize {
     native::executor::worker_budget()
@@ -324,23 +322,30 @@ pub fn warm_up_verifier() {
 /// reports the shape's [`VerificationPlan`].
 ///
 /// The first large batch otherwise pays for growing per-chunk equation scratch
-/// and the final-MSM workspace. This reserves those capacities — assuming the
-/// Actions are spread uniformly across the proofs — and retains them in the
-/// idle scratch pools that `verify_proofs` leases from, bringing a cold call
-/// near its steady-state latency. Provisioning is capacity-only: a real batch
-/// still plans its own work and grows any residual shortfall, and a shape
-/// larger than the pools' per-entry retention ceilings is provisioned but not
-/// retained (the plan reports `retained: false`). Calling again with a larger
-/// shape tops the pools up; `proofs` of zero only warms the verifier and
-/// reports a plan with zero provisioned bytes. Consumes no randomness.
+/// and the final-MSM workspace. This prepares one batch's worth — one
+/// final-MSM workspace and one equation entry per proof-folding chunk,
+/// assuming the Actions are spread uniformly across the proofs — and offers
+/// it to the idle scratch cache that `verify_proofs` leases from, bringing
+/// the next such call near its steady-state latency. Provisioning is
+/// capacity-only: a real batch still plans its own work and grows any
+/// shortfall, including the one equation entry that merging a multi-chunk
+/// batch grows to hold all of its transcript points. A shape exceeding the
+/// cache's retention checks is provisioned and then dropped (the plan
+/// reports `retention_eligible: false`). Calling again with a larger shape
+/// grows the same idle entries; calling repeatedly does not prepare
+/// additional workspaces, so only one batch's scratch is ever warmed.
+/// `proofs` of zero only warms the verifier and reports a plan with zero
+/// provisioned bytes. Consumes no randomness.
 ///
 /// The plan is computed under the pool's final worker budget, so call
-/// [`configure_workers`] first. For admission control, `pooled_batches` is an
-/// upper bound on in-flight batches, not a target: every batch beyond it
-/// allocates and discards `workspace_bytes` of scratch per call, and the
-/// pools never retain more than `max_idle_bytes`. Concurrent batches share
-/// the pool's workers, so each additional in-flight batch adds less
-/// throughput while every batch's latency and the process's peak memory grow.
+/// [`configure_workers`] first. Warm-up is an optimization for the first
+/// call, not a reservation. Later calls can still allocate or grow scratch:
+/// a call that finds no idle entry allocates one, and returns it to the
+/// cache afterwards if it passes the retention checks and a slot is free.
+/// Calls lease a workspace only for their final MSM, so more calls than
+/// `workspace_slots` can overlap while sharing cached workspaces. The slot
+/// count and `max_idle_bytes` describe the idle cache only; neither limits
+/// concurrent verification nor bounds the process's peak memory.
 #[cfg(feature = "verifier")]
 pub fn warm_up_verifier_scratch(proofs: usize, actions: usize) -> VerificationPlan {
     native::verifier::warm_up_verifier_scratch(proofs, actions)

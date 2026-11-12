@@ -174,10 +174,10 @@ pub(crate) fn benchmark_resources() {
     );
 }
 
-/// The proof pipeline's task budget: the pool capped by
-/// [`tuning::PROVING_TASK_CAP`] (and, in benchmarks, `SENSEI_BENCH_PROVING_CAP`).
+/// The proof pipeline's task budget: the full pool (lowered, in benchmarks,
+/// by `SENSEI_BENCH_PROVING_CAP`).
 fn proving_budget(executor: &PoolExecutor) -> udon::exec::TaskBudget {
-    let budget = executor.budget_capped(tuning::PROVING_TASK_CAP);
+    let budget = executor.budget();
     #[cfg(test)]
     let budget = std::env::var("SENSEI_BENCH_PROVING_CAP")
         .ok()

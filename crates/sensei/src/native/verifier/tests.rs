@@ -532,12 +532,13 @@ fn warm_up_scratch_provisions_a_matching_workspace() {
     // reports the shape it provisioned.
     let plan = crate::warm_up_verifier_scratch(16, 32);
     assert_scratch_pools_bounded();
-    assert!(plan.retained);
+    assert!(plan.retention_eligible);
     assert!(plan.workspace_bytes > 0);
     // One equation entry per fold chunk, each holding more than an empty one.
     let chunks = fold_jobs(runtime.fold_cap(), 16, 32);
     assert!(plan.equation_bytes > chunks * Equation::new().retained_bytes());
-    assert_eq!(plan.pooled_batches, runtime.scratch.workspace_slots);
+    // The slot count is the cache's capacity, not the one workspace warmed.
+    assert_eq!(plan.workspace_slots, runtime.scratch.workspace_slots);
     assert_eq!(plan.max_idle_bytes, runtime.scratch.max_idle_bytes());
     assert!(plan.workspace_bytes + plan.equation_bytes <= plan.max_idle_bytes);
     // Warming only reports the pools' policy, with nothing provisioned.
@@ -546,11 +547,11 @@ fn warm_up_scratch_provisions_a_matching_workspace() {
     assert_eq!((warmed.workspace_bytes, warmed.equation_bytes), (0, 0));
     assert_eq!(
         (
-            warmed.pooled_batches,
+            warmed.workspace_slots,
             warmed.max_idle_bytes,
-            warmed.retained
+            warmed.retention_eligible
         ),
-        (plan.pooled_batches, plan.max_idle_bytes, true)
+        (plan.workspace_slots, plan.max_idle_bytes, true)
     );
 }
 
@@ -723,7 +724,13 @@ fn benchmark_verification_stages() {
         crate::verify_proofs(&requests, &mut || Ok(93)).unwrap();
     }
 
-    const GROUPS: [&str; 4] = ["srs", "vk", "lagrange", "dynamic"];
+    // The final MSM's inputs: the fixed three, then every transcript-point
+    // slice in order.
+    const FIXED_GROUPS: [&str; FIXED_INPUTS] = ["srs", "vk", "lagrange"];
+    let group_name = |group: usize| match FIXED_GROUPS.get(group) {
+        Some(name) => (*name).to_string(),
+        None => format!("dynamic_{}", group - FIXED_INPUTS),
+    };
     struct Sample {
         total: u128,
         timings: timing::VerifyTimings,
@@ -808,15 +815,17 @@ fn benchmark_verification_stages() {
         median(&mut collect(&|s| s.timings.prefetch.sum_ns.into())),
         median(&mut collect(&|s| s.timings.prefetch.max_ns.into())),
     );
-    let groups: Vec<_> = GROUPS
-        .iter()
-        .zip(&facts.msm_groups)
-        .map(|(name, (partitions, slots, grain))| format!("{name}:{partitions}/{slots}/{grain}"))
-        .collect();
-    let probes: Vec<_> = GROUPS
+    let groups: Vec<_> = facts
+        .msm_groups
         .iter()
         .enumerate()
-        .map(|(group, name)| {
+        .map(|(group, (partitions, slots, grain))| {
+            format!("{}:{partitions}/{slots}/{grain}", group_name(group))
+        })
+        .collect();
+    assert_eq!(samples[0].timings.msm.len(), facts.msm_groups.len());
+    let probes: Vec<_> = (0..samples[0].timings.msm.len())
+        .map(|group| {
             let kinds: Vec<_> = timing::MSM_TASK_KINDS
                 .iter()
                 .enumerate()
@@ -830,13 +839,14 @@ fn benchmark_verification_stages() {
                     )
                 })
                 .collect();
-            format!("{name}={}", kinds.join("|"))
+            format!("{}={}", group_name(group), kinds.join("|"))
         })
         .collect();
     println!(
-        "SENSEI_VERIFY_MSM budget={} workers={} groups={} {}",
+        "SENSEI_VERIFY_MSM budget={} workers={} inputs={} groups={} {}",
         facts.msm_budget,
         facts.msm_workers,
+        facts.msm_groups.len(),
         groups.join(","),
         probes.join(" "),
     );

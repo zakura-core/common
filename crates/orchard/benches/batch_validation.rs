@@ -7,9 +7,20 @@
 //! every bundle, and `validate`, so proofs and RedPallas signatures are both
 //! included. Worker counts come from `RAYON_NUM_THREADS`, which sizes the
 //! global pool used by Halo2 and Orchard's own fan-out, and Sensei's private
-//! pool. Pin with `taskset` to choose physical cores.
+//! pool. Every result line reports the effective global count as
+//! `rayon_workers` and, for the Sensei backend, the private pool's as
+//! `sensei_workers`; they are fixed for the process, so use one process per
+//! worker setting. Pin with `taskset` to choose physical cores.
 //!
-//! Modes (first argument): `isolated`, `concurrent`, `cold`. Settings:
+//! `cold` times the first validation after this process has proven its
+//! corpus and prepared the verifying key, so shared workers and SRS state
+//! are already initialized; it does not provision verifier scratch.
+//! `rss_kib` and `peak_rss_kib` are whole-process figures from
+//! `/proc/self/status` (Linux only; `None` elsewhere). The peak includes
+//! corpus proving and every earlier cell of the same process.
+//!
+//! Modes (first argument, default `isolated`): `isolated`, `concurrent`,
+//! `cold`. Cargo's own `--bench` argument is ignored. Settings:
 //! `BATCH_CORPUS` bundles proven up front (64), `BATCH_BUNDLES` batch sizes
 //! (`1,16,64`), `BATCH_REPS` (50), `BATCH_WARMUP` untimed calls (5),
 //! `BATCH_CONCURRENT` thread counts (`1,2,4,8`), `BATCH_SECONDS` per
@@ -38,12 +49,53 @@ const VALIDATION_SEED_DOMAIN: u8 = 0x53;
 
 type Corpus = Vec<(Bundle<Authorized, i64>, [u8; 32])>;
 
+/// The validation mode run when no argument selects one.
+const DEFAULT_MODE: &str = "isolated";
+/// The validation modes, as named on the command line.
+const MODES: [&str; 3] = [DEFAULT_MODE, "concurrent", "cold"];
+/// The marker Cargo passes to every benchmark executable, custom harnesses
+/// included; it is not a mode.
+const CARGO_BENCH_MARKER: &str = "--bench";
+
 fn backend() -> &'static str {
     if cfg!(feature = "backend-sensei") {
         "sensei"
     } else {
         "halo2"
     }
+}
+
+/// The effective worker counts, as result-line fields: Rayon's global pool
+/// and, for the Sensei backend, its separate private pool (one when that
+/// pool could not be built). Querying Sensei's count initializes its pool.
+fn workers() -> String {
+    let rayon = rayon::current_num_threads();
+    #[cfg(feature = "backend-sensei")]
+    return format!(
+        "rayon_workers={rayon} sensei_workers={}",
+        sensei::worker_budget()
+    );
+    #[cfg(not(feature = "backend-sensei"))]
+    format!("rayon_workers={rayon}")
+}
+
+/// Selects the mode from the arguments after the program name, ignoring
+/// Cargo's marker; anything else unrecognized or surplus is an error.
+fn select_mode(args: impl IntoIterator<Item = String>) -> Result<&'static str, String> {
+    let mut selected = None;
+    for arg in args {
+        if arg == CARGO_BENCH_MARKER {
+            continue;
+        }
+        let mode = MODES
+            .into_iter()
+            .find(|mode| *mode == arg)
+            .ok_or_else(|| format!("unknown mode {arg}; use one of {MODES:?}"))?;
+        if let Some(previous) = selected.replace(mode) {
+            return Err(format!("more than one mode: {previous} and {mode}"));
+        }
+    }
+    Ok(selected.unwrap_or(DEFAULT_MODE))
 }
 
 fn setting(name: &str, default: usize) -> usize {
@@ -167,10 +219,10 @@ fn mode_isolated(vk: &VerifyingKey, corpus: &Corpus) {
             total.push((admitted + validated).as_nanos());
         }
         println!(
-            "BATCH_ISOLATED backend={} workers={} bundles={bundles} actions={} reps={reps} \
+            "BATCH_ISOLATED backend={} {} bundles={bundles} actions={} reps={reps} \
              add_ns={} validate_ns={} validate_p90_ns={} total_ns={} total_p90_ns={}",
             backend(),
-            rayon::current_num_threads(),
+            workers(),
             bundles * ACTIONS_PER_BUNDLE,
             median(&mut admission),
             median(&mut validation),
@@ -216,11 +268,11 @@ fn mode_concurrent(vk: &VerifyingKey, corpus: &Corpus) {
         let batches: usize = per_thread.iter().map(Vec::len).sum();
         let mut latencies: Vec<u128> = per_thread.into_iter().flatten().collect();
         println!(
-            "BATCH_CONCURRENT backend={} workers={} threads={threads} bundles={bundles} \
+            "BATCH_CONCURRENT backend={} {} threads={threads} bundles={bundles} \
              batches={batches} elapsed_s={elapsed:.2} actions_per_s={:.0} latency_ns={} \
              latency_p90_ns={} rss_kib={:?} peak_rss_kib={:?} os_threads={:?}",
             backend(),
-            rayon::current_num_threads(),
+            workers(),
             (batches * bundles * ACTIONS_PER_BUNDLE) as f64 / elapsed,
             median(&mut latencies),
             p90(&mut latencies),
@@ -240,10 +292,10 @@ fn mode_cold(vk: &VerifyingKey, corpus: &Corpus) {
     let (first_add, first) = validate(vk, batch, 1);
     let (second_add, second) = validate(vk, batch, 2);
     println!(
-        "BATCH_COLD backend={} workers={} bundles={bundles} prepared={prepared} prepare_ns={} \
+        "BATCH_COLD backend={} {} bundles={bundles} prepared={prepared} prepare_ns={} \
          first_ns={} second_ns={} rss_kib={:?} peak_rss_kib={:?}",
         backend(),
-        rayon::current_num_threads(),
+        workers(),
         prepare.as_nanos(),
         (first_add + first).as_nanos(),
         (second_add + second).as_nanos(),
@@ -253,18 +305,20 @@ fn mode_cold(vk: &VerifyingKey, corpus: &Corpus) {
 }
 
 fn main() {
-    let mode = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "isolated".to_string());
+    // Reject a bad invocation before the expensive key and corpus setup.
+    let mode = select_mode(std::env::args().skip(1)).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
     let corpus_size = setting("BATCH_CORPUS", 64);
     let started = Instant::now();
     let pk = ProvingKey::build(VERSION).expect("current circuit supports proving");
     let vk = VerifyingKey::build(VERSION);
     eprintln!(
-        "[{}] keys built in {:.1?}; workers={} os_threads={:?}",
+        "[{}] keys built in {:.1?}; {} os_threads={:?}",
         backend(),
         started.elapsed(),
-        rayon::current_num_threads(),
+        workers(),
         os_threads(),
     );
     let started = Instant::now();
@@ -274,7 +328,7 @@ fn main() {
         backend(),
         started.elapsed()
     );
-    match mode.as_str() {
+    match mode {
         "isolated" => {
             vk.prepare_batch_validation();
             mode_isolated(&vk, &corpus);
@@ -284,7 +338,7 @@ fn main() {
             mode_concurrent(&vk, &corpus);
         }
         "cold" => mode_cold(&vk, &corpus),
-        other => panic!("unknown mode {other}; use isolated, concurrent, or cold"),
+        other => unreachable!("select_mode returned {other}"),
     }
     eprintln!(
         "[{}] done; os_threads={:?} peak_rss_kib={:?}",
