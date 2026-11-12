@@ -786,6 +786,11 @@ mod tests {
                     let mut scratch = ChordScratch::default();
                     for n in [
                         0usize, 1, 7, 8, 9, 31, 32, 33, 255, 256, 257,
+                        // Either side of RECOMPUTE_DENOMINATOR_CHUNKS, in both
+                        // directions on one scratch.
+                        LANES * RECOMPUTE_DENOMINATOR_CHUNKS,
+                        LANES * RECOMPUTE_DENOMINATOR_CHUNKS + 1,
+                        LANES * RECOMPUTE_DENOMINATOR_CHUNKS,
                         LONG_PREFIX_ADDITIONS,
                         257, 33, 9, 8, 7, 1, 0,
                     ] {
