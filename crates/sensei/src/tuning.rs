@@ -71,8 +71,18 @@ pub(crate) const WORKSPACE: WorkspaceRetention = WorkspaceRetention::Discard;
 // than the full pool. On that host the tested caps were no substitute for a
 // smaller pool (`configure_workers`), and work-shaped limits such as
 // VERIFY_MSM_SLICE_POINTS are what let 32 workers match 16. The cause was not
-// isolated, and other hosts were not measured. Unit-test builds can still
-// sweep caps with the `SENSEI_BENCH_*_CAP` overrides.
+// isolated, and task caps were not swept on other hosts. Unit-test builds can
+// still sweep caps with the `SENSEI_BENCH_*_CAP` overrides.
+//
+// The default pool size is the detected parallelism, which counts efficiency
+// cores and SMT siblings alike and is not always the fastest setting. On an
+// M4 Max (12P+4E, 2026-11-11, on battery) a 12-worker pool validated an
+// isolated 64-bundle batch 10-12% faster than the default 16 (4.33 against
+// 4.79-4.86 ms, the difference in folding) and one batch at a time 14%
+// faster, with 4 and 8 batches in flight level; the Halo2 backend showed the
+// same preference. Twelve workers are not pinned to performance cores, and
+// this is one host: the default stays the detected count, and applications
+// choose with `configure_workers`.
 /// Final-equation transcript points per MSM input slice. The batch's
 /// transcript commitments enter the final MSM as independent slices of at
 /// least this many points (never more slices than the MSM task budget), so
@@ -97,9 +107,13 @@ pub(crate) const VERIFY_FOLD_MIN_ACTIONS: usize = 2;
 /// carries about 2,200 terms, so this floor requests about sixteen tasks for
 /// it on pools that large. Intel anchors (i9-7960X): sixteen tasks verify a
 /// one-proof batch in 1.73 ms at 16 workers against 2.15 ms with eight
-/// (the previous floor of 256 terms, the M-series small-batch optimum at
-/// the time; 128 has not been revalidated there) and 3.1 ms with four; a 16-proof
-/// batch gains 11% at 16 and 32 workers, and an 8-worker pool is unchanged.
+/// (the previous floor of 256 terms) and 3.1 ms with four; a 16-proof batch
+/// gains 11% at 16 and 32 workers, and an 8-worker pool is unchanged. Apple
+/// anchors (M4 Max, 12P+4E, 2026-11-11, on battery): 256 limits a one-proof
+/// batch to eight tasks, and 128 validates one bundle 6-12% faster at 12 and
+/// 16 workers (0.91 against 1.03 ms at 12) while 16- and 64-bundle batches
+/// are within 1%, so the pre-slicing M-series preference for 256 no longer
+/// holds.
 pub(crate) const VERIFY_MSM_MIN_TERMS: usize = 128;
 
 // Bounded idle verification scratch, retained across calls. Each verification

@@ -249,7 +249,10 @@ pub fn warm_up() {
 /// and is final afterwards. Precedence is Rayon-consistent: this explicit
 /// budget wins; otherwise a positive integer `RAYON_NUM_THREADS` sizes the
 /// pool (a zero or unparseable value is ignored), and the detected available
-/// parallelism is the fallback. The pool is private to Sensei, so neither
+/// parallelism is the fallback. That fallback counts every logical CPU,
+/// efficiency cores and SMT siblings included, and is not always the fastest
+/// size, so measure the deployment's own workload before choosing a budget.
+/// The pool is private to Sensei, so neither
 /// this budget nor the environment variable selects or resizes Rayon's global
 /// pool. Without the `multicore` feature execution is serial and an accepted
 /// budget has no effect.
