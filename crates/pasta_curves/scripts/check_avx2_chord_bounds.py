@@ -33,7 +33,13 @@ for name, modulus in MODULI.items():
     raw = re.search(rf"const MODULUS: {name} = {name}\(\[(.*?)\]\);", field_src, re.S)
     words = [int(word.strip().replace("_", ""), 0) for word in raw[1].split(",") if word.strip()]
     assert sum(word << (64 * i) for i, word in enumerate(words)) == modulus
-body = src.split("pub(super) fn mul<", 1)[1].split("/// Lane-wise Montgomery square.", 1)[0]
+# `mul` expands the generated `mul29!` macro (which `chord_level` also
+# inlines), so audit the macro's body.
+wrapper = src.split("pub(super) fn mul<", 1)[1].split("/// Lane-wise Montgomery square.", 1)[0]
+assert re.search(r"\{\s*mul29!\(a, b, P0, P1, P2, P3\)\s*\}", wrapper), wrapper
+body = src.split("macro_rules! mul29 {", 1)[1].split("pub(super) fn mul<", 1)[0]
+body = body.replace("{ $crate::arithmetic::avx2_sqrt::BITS }", "BITS")
+body = body.replace("$crate::arithmetic::avx2_sqrt::", "")
 body = body.split("let mut carry = zero;", 1)[1]
 statements = re.findall(
     r"(let col|q\[\d+\]|carry|out\[\d+\]) = (.*?);", body, re.S

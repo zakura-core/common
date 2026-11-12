@@ -1,8 +1,9 @@
-//! Four-way AVX2 affine chord additions for the fixed-base sums.
+//! Four-way AVX2 affine chord additions for the GLV MSM buckets and the
+//! fixed-base sums.
 //!
-//! The fixed-base sums (`glv::fixed_base`) reduce lists of affine points pairwise,
-//! one tree level at a time, sharing one inversion per level (Montgomery's
-//! trick). Each addition costs six field multiplications, independent across
+//! The GLV MSM and the fixed-base sums (`glv::fixed_base`) reduce lists of
+//! affine points pairwise, one tree level at a time, sharing one inversion
+//! per level (Montgomery's trick). Each addition costs six field multiplications, independent across
 //! the additions of a level, so [`chord_level`] runs eight at a time: two
 //! vectors of four lanes, in the radix-2^29 arithmetic of
 //! [`super::avx2_sqrt`] (availability and the AVX2 guarantee are documented
@@ -36,7 +37,9 @@
 
 use core::arch::x86_64::*;
 
-use super::avx2_sqrt::{BITS, L, MASK, V, mul, pack, pasta_limbs29};
+#[cfg(test)]
+use super::avx2_sqrt::mul;
+use super::avx2_sqrt::{BITS, L, MASK, V, pack, pasta_limbs29};
 use alloc::vec::Vec;
 
 /// Additions in flight: two vectors of four lanes.
@@ -218,12 +221,27 @@ pub(crate) fn invert_lanes<F: Avx2ChordField>(
     Some(())
 }
 
-/// Per-chunk buffers of [`chord_level`] (about 144 bytes per addition),
-/// reused across the levels of one reduction.
+/// Levels of more than this many chunks recompute each chunk's denominators
+/// in the backward pass instead of storing them: past about 300 KB of
+/// per-level scratch, rereading them from beyond L2 costs more than the
+/// subtraction (Zen 4, 512 bundles: MSM -11%); smaller levels keep them.
+const RECOMPUTE_DENOMINATOR_CHUNKS: usize = 256;
+
+/// Per-chunk buffers of [`chord_level`] (about 144 bytes per addition, or 72
+/// for levels that recompute their denominators), reusable across levels,
+/// windows and MSMs like the scalar reducer's staging vectors.
 #[derive(Default)]
 pub struct ChordScratch {
     scaled: Vec<[V; G]>,
     denominators: Vec<[V; G]>,
+}
+
+impl ChordScratch {
+    /// Bytes held by the buffers' capacities.
+    #[cfg(feature = "multicore")]
+    pub(crate) fn capacity_bytes(&self) -> usize {
+        (self.scaled.capacity() + self.denominators.capacity()) * core::mem::size_of::<[V; G]>()
+    }
 }
 
 impl core::fmt::Debug for ChordScratch {
@@ -394,7 +412,7 @@ pub(crate) fn chord_level<const P0: u64, const P1: u64, const P2: u64, const P3:
     let k5 = const { kp(&pasta_limbs29(&[P0, P1, P2, P3]), 5) };
     macro_rules! mul {
         ($a:expr, $b:expr) => {
-            mul::<P0, P1, P2, P3>($a, $b)
+            crate::arithmetic::avx2_sqrt::mul29!($a, $b, P0, P1, P2, P3)
         };
     }
     let chunks = n.div_ceil(LANES);
@@ -419,10 +437,13 @@ pub(crate) fn chord_level<const P0: u64, const P1: u64, const P2: u64, const P3:
         scaled,
         denominators,
     } = scratch;
+    let recompute = chunks > RECOMPUTE_DENOMINATOR_CHUNKS;
     scaled.clear();
     denominators.clear();
     scaled.reserve(chunks);
-    denominators.reserve(chunks);
+    if !recompute {
+        denominators.reserve(chunks);
+    }
     for chunk in 0..chunks {
         let base = chunk * LANES;
         let mut s = lane_products;
@@ -445,7 +466,9 @@ pub(crate) fn chord_level<const P0: u64, const P1: u64, const P2: u64, const P3:
             lane_products[g] = mul!(&lane_products[g], &d[g]);
         }
         scaled.push(s);
-        denominators.push(d);
+        if !recompute {
+            denominators.push(d);
+        }
     }
 
     let mut inverses = [[0u64; 4]; LANES];
@@ -460,34 +483,66 @@ pub(crate) fn chord_level<const P0: u64, const P1: u64, const P2: u64, const P3:
     let mut j: [V; G] =
         core::array::from_fn(|g| pack(&core::array::from_fn(|l| inverses[4 * g + l])));
 
-    for chunk in (0..chunks).rev() {
-        let base = chunk * LANES;
-        for g in 0..G {
-            let slope = mul!(&scaled[chunk][g], &j[g]);
-            j[g] = mul!(&j[g], &denominators[chunk][g]);
-            let slope32 = shl5(&slope);
-            let first = base + 4 * g;
-            let ops = [
-                operands(first),
-                operands(first + 1),
-                operands(first + 2),
-                operands(first + 3),
-            ];
-            let lx = load4([&ops[0].0.x, &ops[1].0.x, &ops[2].0.x, &ops[3].0.x]);
-            let ly = load4([&ops[0].0.y, &ops[1].0.y, &ops[2].0.y, &ops[3].0.y]);
-            let rx = load4([&ops[0].1.x, &ops[1].1.x, &ops[2].1.x, &ops[3].1.x]);
-            let x_sum = add(&lx, &rx);
-            let x3 = sub(&mul!(&slope, &slope32), &x_sum, &k3);
-            let y3 = sub(&mul!(&slope32, &sub(&lx, &x3, &k5)), &ly, &k2);
-            let xs = store4(&canonical(&x3, &p));
-            let ys = store4(&canonical(&y3, &p));
-            for l in 0..4 {
-                let i = base + 4 * g + l;
-                if i < n {
-                    next[pair(i).2] = Point29 { x: xs[l], y: ys[l] };
+    // The backward pass, expanded once per way of getting a group's
+    // denominator so that neither copy branches per group. Stored
+    // denominators keep the original order (multiplies before the loads);
+    // recomputed ones need the loads first.
+    macro_rules! backward_pass {
+        (
+            $chunk:ident, $g:ident, $lx:ident, $rx:ident, $slope:ident,
+            before_loads: { $($before:tt)* },
+            after_loads: { $($after:tt)* }
+        ) => {
+            for $chunk in (0..chunks).rev() {
+                let base = $chunk * LANES;
+                for $g in 0..G {
+                    $($before)*
+                    let first = base + 4 * $g;
+                    let ops = [
+                        operands(first),
+                        operands(first + 1),
+                        operands(first + 2),
+                        operands(first + 3),
+                    ];
+                    let $lx = load4([&ops[0].0.x, &ops[1].0.x, &ops[2].0.x, &ops[3].0.x]);
+                    let ly = load4([&ops[0].0.y, &ops[1].0.y, &ops[2].0.y, &ops[3].0.y]);
+                    let $rx = load4([&ops[0].1.x, &ops[1].1.x, &ops[2].1.x, &ops[3].1.x]);
+                    $($after)*
+                    let slope32 = shl5(&$slope);
+                    let x_sum = add(&$lx, &$rx);
+                    let x3 = sub(&mul!(&$slope, &slope32), &x_sum, &k3);
+                    let y3 = sub(&mul!(&slope32, &sub(&$lx, &x3, &k5)), &ly, &k2);
+                    let xs = store4(&canonical(&x3, &p));
+                    let ys = store4(&canonical(&y3, &p));
+                    for l in 0..4 {
+                        let i = base + 4 * $g + l;
+                        if i < n {
+                            next[pair(i).2] = Point29 { x: xs[l], y: ys[l] };
+                        }
+                    }
                 }
             }
-        }
+        };
+    }
+    if recompute {
+        backward_pass!(
+            chunk, g, lx, rx, slope,
+            before_loads: {},
+            after_loads: {
+                let denominator = shl5(&sub(&rx, &lx, &k2));
+                let slope = mul!(&scaled[chunk][g], &j[g]);
+                j[g] = mul!(&j[g], &denominator);
+            }
+        );
+    } else {
+        backward_pass!(
+            chunk, g, lx, rx, slope,
+            before_loads: {
+                let slope = mul!(&scaled[chunk][g], &j[g]);
+                j[g] = mul!(&j[g], &denominators[chunk][g]);
+            },
+            after_loads: {}
+        );
     }
     Some(())
 }
@@ -731,6 +786,11 @@ mod tests {
                     let mut scratch = ChordScratch::default();
                     for n in [
                         0usize, 1, 7, 8, 9, 31, 32, 33, 255, 256, 257,
+                        // Either side of RECOMPUTE_DENOMINATOR_CHUNKS, in both
+                        // directions on one scratch.
+                        LANES * RECOMPUTE_DENOMINATOR_CHUNKS,
+                        LANES * RECOMPUTE_DENOMINATOR_CHUNKS + 1,
+                        LANES * RECOMPUTE_DENOMINATOR_CHUNKS,
                         LONG_PREFIX_ADDITIONS,
                         257, 33, 9, 8, 7, 1, 0,
                     ] {
