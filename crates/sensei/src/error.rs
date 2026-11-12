@@ -56,3 +56,32 @@ impl fmt::Display for Error {
 }
 
 impl core::error::Error for Error {}
+
+/// A rejected [`crate::configure_workers`] call.
+///
+/// The worker budget is process-wide and read once when the shared executor
+/// initializes; these faults report why a configuration cannot take effect.
+#[cfg(any(feature = "prover", feature = "verifier"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkersConfigError {
+    /// A worker budget must permit at least one worker.
+    Zero,
+    /// An earlier [`crate::configure_workers`] call already set the budget.
+    AlreadyConfigured,
+    /// The shared executor is already initialized; its workers are final.
+    AlreadyInitialized,
+}
+
+#[cfg(any(feature = "prover", feature = "verifier"))]
+impl fmt::Display for WorkersConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Zero => "worker budget must permit at least one worker",
+            Self::AlreadyConfigured => "worker budget was already configured",
+            Self::AlreadyInitialized => "shared executor is already initialized",
+        })
+    }
+}
+
+#[cfg(any(feature = "prover", feature = "verifier"))]
+impl core::error::Error for WorkersConfigError {}

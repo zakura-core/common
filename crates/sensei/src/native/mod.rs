@@ -318,6 +318,8 @@ impl PreparedProver {
 mod optimization_tests;
 #[cfg(all(test, feature = "prover"))]
 pub(crate) mod stage_timing;
+#[cfg(all(test, feature = "verifier"))]
+pub(crate) mod task_stats;
 
 /// Builds an array by calling `entry` in index order (`0..LEN`).
 ///

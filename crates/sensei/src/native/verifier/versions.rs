@@ -310,7 +310,7 @@ fn every_version_union_matches_affine_msm_and_merges() {
                 expected =
                     expected.add(&VK_COMMITMENTS[index as usize].to_projective().mul(&scalar));
             }
-            combined.merge(equation);
+            combined.merge(&mut equation);
         }
         assert_eq!(usize::from(combined.versions), mask);
         assert_eq!(
@@ -344,10 +344,7 @@ fn historical_fixture_files_are_pinned() {
 }
 
 #[test]
-fn mixed_scratch_is_released_after_success_and_failure() {
-    if tuning::WORKSPACE != WorkspaceRetention::Discard {
-        return;
-    }
+fn mixed_scratch_stays_bounded_after_success_and_failure() {
     let fixtures = corpus::VERSIONS.map(|version| corpus::small(version, 2));
     let requests: Vec<_> = fixtures
         .iter()
@@ -368,10 +365,10 @@ fn mixed_scratch_is_released_after_success_and_failure() {
             crate::verify_proofs(&batch, &mut || Ok(71)),
             Err(Error::InvalidProof)
         );
-        assert!(VerifierRuntime::get().idle.lock().unwrap().is_none());
+        assert_scratch_pools_bounded();
     }
     assert_eq!(crate::verify_proofs(&requests, &mut || Ok(71)), Ok(()));
-    assert!(VerifierRuntime::get().idle.lock().unwrap().is_none());
+    assert_scratch_pools_bounded();
 }
 
 #[test]

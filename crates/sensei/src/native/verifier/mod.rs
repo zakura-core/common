@@ -41,18 +41,38 @@
 //! preparing its own verifying-key bank in that executor. [`RUNTIME`] retains a
 //! successful `VerifierRuntime`; unlike the prover's cell it stores no
 //! `Result`. The public [`crate::warm_up_verifier`] contract describes this
-//! preparation-only entry point, which acquires no verification scratch.
+//! preparation-only entry point, which acquires no verification scratch;
+//! [`crate::warm_up_verifier_scratch`] optionally provisions the bounded idle
+//! pools below for an expected batch shape.
 //!
 //! [`verify`] returns immediately for an empty batch. Otherwise it samples batch
 //! weights on the calling thread before runtime initialization, scratch
 //! acquisition, or pool entry; a singleton needs no draws. The borrowed
 //! [`RandomSource`] stays on that thread, allowing reentrant callbacks, and only
-//! the weights reach workers. Each worker chunk creates its own [`Equation`],
-//! dropped after folding the chunk; instance commitments walk the runtime's
-//! fixed-base generator bank, so chunk folding runs no MSM. After merging
-//! successful equations, [`VerifierRuntime::check`] borrows a workspace for
-//! the final MSM. Only that workspace participates in the runtime's idle-slot
-//! retention policy.
+//! the weights reach workers. Task budgets follow the work: [`fold_jobs`] cuts
+//! at most one chunk per [`tuning::VERIFY_FOLD_MIN_ACTIONS`] Actions (within
+//! the pool's budget and the proof count), and a single-chunk
+//! batch folds on the calling thread without the pool scheduler. Each chunk
+//! leases its [`Equation`] from the runtime's bounded scratch pool; instance
+//! commitments walk the runtime's fixed-base generator bank, so chunk folding
+//! runs no MSM. After merging successful equations — draining each merged
+//! shell back to the pool — [`VerifierRuntime::check`] leases a workspace for
+//! the final MSM, whose budget [`msm_tasks`] likewise floors the terms per
+//! task at [`tuning::VERIFY_MSM_MIN_TERMS`], and whose transcript points enter
+//! as [`slice_len`] slices of at least [`tuning::VERIFY_MSM_SLICE_POINTS`] so
+//! that no single input's window count bounds the MSM's parallelism.
+//!
+//! [`VerifierScratch`] owns both pools, with slot counts
+//! [`tuning::verifier_equation_slots`] and [`tuning::verifier_workspace_slots`]
+//! derive from the pool's budget: a lease that finds its pool empty allocates,
+//! and equations and final-MSM workspaces are returned after success and after
+//! reported errors, and dropped instead when a pool is full or an entry's
+//! retained capacity exceeds its tuning ceiling. The accounted capacity of
+//! idle scratch therefore never exceeds the slot × ceiling bound that
+//! [`warm_up_verifier_scratch`] reports in its [`VerificationPlan`]; scratch
+//! leased by active calls is outside that bound. Unwinding drops the active
+//! scratch without returning it. A workspace is leased only for the final
+//! MSM, so overlapping calls can reuse one slot at different times.
 
 use super::{
     commitment::{FixedGenerator, MsmWorkspace},
@@ -71,9 +91,7 @@ use super::{
     worker::Execution,
 };
 use crate::{
-    Error, RandomSource, VerificationRequest,
-    rng::sample_fp,
-    tuning::{self, WorkspaceRetention},
+    Error, RandomSource, VerificationPlan, VerificationRequest, rng::sample_fp, tuning,
     types::NativeStatement,
 };
 use sensei_shared::{
@@ -82,11 +100,14 @@ use sensei_shared::{
     commitment_tables::Codebook,
     records::{VERIFIER_POINT_COUNT, VERIFIER_VERSION_COUNT, VerifierCommitments},
 };
-use std::sync::{Arc, Mutex, OnceLock};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use udon::{
     curve::{
         PreparedAffinePoint, Vesta, VestaAffine, VestaPoint, VestaProjective, batch_normalize,
     },
+    exec::TaskBudget,
     field::{Fp, Fq, batch_invert},
     msm::{AlphaTable, Bases, Input},
 };
@@ -132,7 +153,133 @@ struct VerifierRuntime {
     instance_generators: Vec<FixedGenerator>,
     codebook: Arc<Codebook>,
     executor: &'static PoolExecutor,
-    idle: Mutex<Option<MsmWorkspace>>,
+    scratch: VerifierScratch,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    // Recovering a poisoned idle pool permits reuse of its slots; it does not
+    // turn a panicking computation into a successful one.
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The bounded idle scratch pools described in the module scratch section.
+struct VerifierScratch {
+    equations: Mutex<Vec<Equation>>,
+    workspaces: Mutex<Vec<MsmWorkspace>>,
+    /// Slot counts from [`tuning::verifier_equation_slots`] and
+    /// [`tuning::verifier_workspace_slots`] for this pool's budgets.
+    equation_slots: usize,
+    workspace_slots: usize,
+    #[cfg(test)]
+    counters: ScratchCounters,
+}
+
+/// Test-only pool traffic: leases that found the pool empty (`misses`) and
+/// returns dropped for exceeding a ceiling or a full pool.
+#[cfg(test)]
+#[derive(Default)]
+struct ScratchCounters {
+    equation_misses: AtomicUsize,
+    equation_ceiling_drops: AtomicUsize,
+    equation_full_drops: AtomicUsize,
+    workspace_misses: AtomicUsize,
+    workspace_ceiling_drops: AtomicUsize,
+    workspace_full_drops: AtomicUsize,
+}
+
+/// A snapshot of [`ScratchCounters`], in the same field order.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct ScratchSnapshot {
+    pub(super) equation_misses: usize,
+    pub(super) equation_ceiling_drops: usize,
+    pub(super) equation_full_drops: usize,
+    pub(super) workspace_misses: usize,
+    pub(super) workspace_ceiling_drops: usize,
+    pub(super) workspace_full_drops: usize,
+}
+
+#[cfg(test)]
+fn count(counter: &AtomicUsize) {
+    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+impl VerifierScratch {
+    fn new(equation_slots: usize, workspace_slots: usize) -> Self {
+        Self {
+            equations: Mutex::new(Vec::new()),
+            workspaces: Mutex::new(Vec::new()),
+            equation_slots,
+            workspace_slots,
+            #[cfg(test)]
+            counters: ScratchCounters::default(),
+        }
+    }
+    /// The idle retention bound: every slot filled to its ceiling.
+    fn max_idle_bytes(&self) -> usize {
+        self.workspace_slots * tuning::VERIFIER_WORKSPACE_MAX_BYTES
+            + self.equation_slots * tuning::VERIFIER_EQUATION_MAX_BYTES
+    }
+    #[cfg(test)]
+    pub(super) fn snapshot(&self) -> ScratchSnapshot {
+        use std::sync::atomic::Ordering::Relaxed;
+        let counters = &self.counters;
+        ScratchSnapshot {
+            equation_misses: counters.equation_misses.load(Relaxed),
+            equation_ceiling_drops: counters.equation_ceiling_drops.load(Relaxed),
+            equation_full_drops: counters.equation_full_drops.load(Relaxed),
+            workspace_misses: counters.workspace_misses.load(Relaxed),
+            workspace_ceiling_drops: counters.workspace_ceiling_drops.load(Relaxed),
+            workspace_full_drops: counters.workspace_full_drops.load(Relaxed),
+        }
+    }
+    fn lease_equation(&self) -> Equation {
+        lock(&self.equations).pop().unwrap_or_else(|| {
+            #[cfg(test)]
+            count(&self.counters.equation_misses);
+            Equation::new()
+        })
+    }
+    fn return_equation(&self, mut equation: Equation) {
+        equation.reset();
+        if equation.retained_bytes() > tuning::VERIFIER_EQUATION_MAX_BYTES {
+            #[cfg(test)]
+            count(&self.counters.equation_ceiling_drops);
+            return;
+        }
+        let mut idle = lock(&self.equations);
+        if idle.len() < self.equation_slots {
+            idle.push(equation);
+        } else {
+            #[cfg(test)]
+            count(&self.counters.equation_full_drops);
+        }
+    }
+    fn lease_workspace(&self) -> MsmWorkspace {
+        lock(&self.workspaces).pop().unwrap_or_else(|| {
+            #[cfg(test)]
+            count(&self.counters.workspace_misses);
+            MsmWorkspace::new()
+        })
+    }
+    // Callers return a workspace only after draining its batch, the same
+    // returned-slot condition `MsmWorkspace::retained_bytes` requires.
+    fn return_workspace(&self, workspace: MsmWorkspace) {
+        if workspace.retained_bytes() > tuning::VERIFIER_WORKSPACE_MAX_BYTES {
+            #[cfg(test)]
+            count(&self.counters.workspace_ceiling_drops);
+            return;
+        }
+        let mut idle = lock(&self.workspaces);
+        if idle.len() < self.workspace_slots {
+            idle.push(workspace);
+        } else {
+            #[cfg(test)]
+            count(&self.counters.workspace_full_drops);
+        }
+    }
 }
 
 static RUNTIME: OnceLock<VerifierRuntime> = OnceLock::new();
@@ -191,39 +338,60 @@ impl VerifierRuntime {
             }),
             codebook,
             executor,
-            idle: Mutex::new(None),
+            scratch: VerifierScratch::new(
+                tuning::verifier_equation_slots(executor.budget().get()),
+                tuning::verifier_workspace_slots(executor.budget().get()),
+            ),
         }
     }
-    fn check(&self, equation: &Equation) -> Result<(), Error> {
-        let retain = tuning::WORKSPACE == WorkspaceRetention::RetainOne;
-        let mut scratch = if retain {
-            self.idle.lock().unwrap_or_else(|e| e.into_inner()).take()
-        } else {
-            None
+    fn check(
+        &self,
+        equation: &Equation,
+        #[cfg(test)] timing: &mut timing::Recorder,
+    ) -> Result<(), Error> {
+        let mut scratch = self.scratch.lease_workspace();
+        #[cfg(test)]
+        {
+            timing.facts.workspace_before = scratch.retained_bytes();
         }
-        .unwrap_or_else(MsmWorkspace::new);
-        let result = self.evaluate(equation, &mut scratch).and_then(|point| {
-            if point.is_identity() {
-                Ok(())
-            } else {
-                Err(Error::InvalidProof)
-            }
-        });
-        if retain {
-            let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
-            if idle.is_none() {
-                *idle = Some(scratch);
-            }
+        let result = self
+            .evaluate_with(
+                equation,
+                &mut scratch,
+                #[cfg(test)]
+                timing,
+            )
+            .and_then(|point| {
+                if point.is_identity() {
+                    Ok(())
+                } else {
+                    Err(Error::InvalidProof)
+                }
+            });
+        #[cfg(test)]
+        {
+            // The batch dropped with `evaluate_with`, so every lease is back.
+            timing.facts.workspace_after = scratch.retained_bytes();
+            timing.mark(timing::Stage::Finish);
         }
+        self.scratch.return_workspace(scratch);
         result
     }
+    #[cfg(test)]
     fn evaluate(
         &self,
         equation: &Equation,
         scratch: &mut MsmWorkspace,
     ) -> Result<VestaProjective, Error> {
+        self.evaluate_with(equation, scratch, &mut timing::Recorder::disabled())
+    }
+    fn evaluate_with(
+        &self,
+        equation: &Equation,
+        scratch: &mut MsmWorkspace,
+        #[cfg(test)] timing: &mut timing::Recorder,
+    ) -> Result<VestaProjective, Error> {
         self.executor.run(|executor| {
-            let mut output = [VestaProjective::IDENTITY; 4];
             let bases =
                 Bases::AlphaPrepared(AlphaTable::bind(self.codebook.view(), &self.vk_bases));
             let indices = &self.vk_indices[usize::from(equation.versions)];
@@ -247,24 +415,56 @@ impl VerifierRuntime {
                 Input::indexed(bases, indices, &selected[..indices.len()])
                     .map_err(|_| Error::InternalInvariant)?
             };
+            // Slicing pairs two chunk iterators, which would drop a trailing
+            // chunk silently if these lengths ever differed; `Input::new`
+            // checks only each pair.
+            if equation.points.len() != equation.scalars.len() {
+                return Err(Error::InternalInvariant);
+            }
+            let budget = self.msm_budget(equation.points.len());
             // Equation::new/point/merge preserve these bank and point/scalar
-            // lengths; four inputs require exactly the four outputs above.
-            scratch
-                .prepare(
-                    &[
-                        Input::new(self.srs.coefficient_bases(), &equation.fixed[..N]),
-                        vk_input,
-                        Input::new(
-                            self.srs.lagrange_bases().range(0..INSTANCE_VALUE_COUNT),
-                            &equation.fixed[INSTANCE_OFFSET..BLIND_GENERATOR_SLOT],
-                        ),
-                        Input::new(Bases::Prepared(&equation.points), &equation.scalars),
-                    ],
-                    self.executor.budget(),
-                )
-                .map_err(|_| Error::InternalInvariant)?
-                .execute(&mut output, executor)
+            // lengths; every input produces exactly one output below.
+            let mut inputs = Vec::with_capacity(FIXED_INPUTS + budget.get());
+            inputs.extend([
+                Input::new(self.srs.coefficient_bases(), &equation.fixed[..N]),
+                vk_input,
+                Input::new(
+                    self.srs.lagrange_bases().range(0..INSTANCE_VALUE_COUNT),
+                    &equation.fixed[INSTANCE_OFFSET..BLIND_GENERATOR_SLOT],
+                ),
+            ]);
+            let slice = slice_len(budget.get(), equation.points.len());
+            inputs.extend(
+                equation
+                    .points
+                    .chunks(slice)
+                    .zip(equation.scalars.chunks(slice))
+                    .map(|(points, scalars)| Input::new(Bases::Prepared(points), scalars)),
+            );
+            let mut output = vec![VestaProjective::IDENTITY; inputs.len()];
+            #[cfg(test)]
+            timing.msm_inputs(inputs.len());
+            let mut batch = scratch
+                .prepare(&inputs, budget)
                 .map_err(|_| Error::InternalInvariant)?;
+            #[cfg(test)]
+            {
+                timing.mark(timing::Stage::MsmPrepare);
+                let (workers, groups) = batch.shape();
+                timing.facts.msm_budget = budget.get();
+                timing.facts.msm_workers = workers;
+                timing.facts.msm_groups = groups;
+            }
+            #[cfg(test)]
+            let executed = batch.execute_probed(&mut output, executor, &timing.msm);
+            #[cfg(not(test))]
+            let executed = batch.execute(&mut output, executor);
+            executed.map_err(|_| Error::InternalInvariant)?;
+            #[cfg(test)]
+            {
+                drop(batch);
+                timing.mark(timing::Stage::MsmExecute);
+            }
             let fixed = FixedGenerator::sum(
                 [&self.srs.blind_generator, &self.srs.ipa_generator],
                 &[
@@ -275,10 +475,166 @@ impl VerifierRuntime {
             Ok(output.iter().fold(fixed, |sum, point| sum.add(point)))
         })
     }
+    fn msm_budget(&self, dynamic_points: usize) -> TaskBudget {
+        let cap = self.executor.budget().get();
+        #[cfg(not(test))]
+        let tasks = msm_tasks(cap, dynamic_points);
+        #[cfg(test)]
+        let tasks = msm_tasks_with(
+            bench_override("SENSEI_BENCH_MSM_CAP", cap),
+            dynamic_points,
+            bench_setting("SENSEI_BENCH_MSM_MIN_TERMS", tuning::VERIFY_MSM_MIN_TERMS),
+        );
+        TaskBudget::new(tasks).expect("nonzero task floor")
+    }
+    fn fold_cap(&self) -> usize {
+        let cap = self.executor.budget().get();
+        #[cfg(test)]
+        let cap = bench_override("SENSEI_BENCH_FOLD_CAP", cap);
+        cap
+    }
+}
+
+/// The final MSM's fixed inputs: coefficient SRS, verifying-key bank, and
+/// instance Lagrange bases. The transcript points follow as slices.
+const FIXED_INPUTS: usize = 3;
+
+/// Final-MSM task budget: one task per [`tuning::VERIFY_MSM_MIN_TERMS`] of the
+/// equation's terms, within the pool budget `cap`. The fixed segments are the
+/// coefficient SRS, deduplicated verifying-key bank, and instance Lagrange
+/// bases; `dynamic_points` counts the batch's transcript commitments.
+fn msm_tasks(cap: usize, dynamic_points: usize) -> usize {
+    msm_tasks_with(cap, dynamic_points, tuning::VERIFY_MSM_MIN_TERMS)
+}
+fn msm_tasks_with(cap: usize, dynamic_points: usize, min_terms: usize) -> usize {
+    let terms = N + VERIFIER_POINT_COUNT + INSTANCE_VALUE_COUNT + dynamic_points;
+    (terms / min_terms.max(1)).clamp(1, cap.max(1))
+}
+
+/// Transcript points per final-MSM input slice: the batch's points split
+/// into one slice per [`tuning::VERIFY_MSM_SLICE_POINTS`], never more slices
+/// than the MSM task budget, and at least one point per slice.
+fn slice_len(budget: usize, dynamic_points: usize) -> usize {
+    let slices = (dynamic_points / tuning::VERIFY_MSM_SLICE_POINTS).clamp(1, budget.max(1));
+    #[cfg(test)]
+    let slices = std::env::var("SENSEI_BENCH_MSM_SLICES")
+        .ok()
+        .map(|value| value.parse::<usize>().expect("positive slice count"))
+        .unwrap_or(slices)
+        .clamp(1, dynamic_points.max(1));
+    dynamic_points.div_ceil(slices).max(1)
+}
+
+/// Fold-chunk budget: one chunk per [`tuning::VERIFY_FOLD_MIN_ACTIONS`]
+/// Actions of folding work, never more than the proofs or the pool budget
+/// `cap` allow. A single-chunk batch folds on the calling thread.
+fn fold_jobs(cap: usize, proofs: usize, actions: usize) -> usize {
+    (actions / tuning::VERIFY_FOLD_MIN_ACTIONS).clamp(1, cap.max(1).min(proofs.max(1)))
+}
+
+/// A benchmark's environment override lowering a pool budget to a task cap,
+/// for sweeping caps without rebuilding; the pool still bounds the result.
+#[cfg(test)]
+fn bench_override(name: &str, resolved: usize) -> usize {
+    bench_setting(name, resolved).clamp(1, resolved.max(1))
+}
+
+/// A benchmark's environment override of a tuning value, unbounded.
+#[cfg(test)]
+fn bench_setting(name: &str, default: usize) -> usize {
+    std::env::var(name).ok().map_or(default, |value| {
+        value.parse().expect("positive tuning value")
+    })
 }
 
 pub(crate) fn warm_up_verifier() {
     let _ = VerifierRuntime::get();
+}
+
+/// Provisions one batch's scratch for an expected shape — its chunk equations
+/// and one final-MSM workspace — offers it to the bounded idle pools, and
+/// reports its plan; the public [`crate::warm_up_verifier_scratch`] contract
+/// describes the sizing. The plan's bytes are measured on the entries just
+/// provisioned: an uncontended `verify` leases the same entries for the
+/// shape, then grows one of them to the whole batch when it merges the
+/// chunks. `retention_eligible` evaluates the pools' size and slot checks on
+/// those entries; it does not observe whether each return found a free slot.
+pub(crate) fn warm_up_verifier_scratch(proofs: usize, actions: usize) -> VerificationPlan {
+    let runtime = VerifierRuntime::get();
+    let scratch = &runtime.scratch;
+    let mut plan = VerificationPlan {
+        workspace_bytes: 0,
+        equation_bytes: 0,
+        workspace_slots: scratch.workspace_slots,
+        retention_eligible: true,
+        max_idle_bytes: scratch.max_idle_bytes(),
+    };
+    if proofs == 0 {
+        return plan;
+    }
+    let actions = actions.max(proofs);
+    let jobs = fold_jobs(runtime.fold_cap(), proofs, actions);
+    // Transcript point counts depend only on each proof's Action count; size
+    // chunks for a uniform Action split, like the batches being provisioned for.
+    let per_proof = super::protocol::transcript_encoding::point_runs(actions.div_ceil(proofs))
+        .map_or(0, |runs| runs.iter().map(|(_, count)| count).sum());
+    let chunk_points = per_proof * proofs.div_ceil(jobs);
+    // Hold every lease before returning any, so the pool keeps `jobs` distinct
+    // provisioned equations rather than re-provisioning one repeatedly.
+    let mut equations: Vec<_> = (0..jobs).map(|_| scratch.lease_equation()).collect();
+    for equation in &mut equations {
+        equation.points.reserve(chunk_points);
+        equation.scalars.reserve(chunk_points);
+    }
+    plan.retention_eligible &= jobs <= scratch.equation_slots;
+    for equation in equations {
+        let bytes = equation.retained_bytes();
+        plan.equation_bytes += bytes;
+        plan.retention_eligible &= bytes <= tuning::VERIFIER_EQUATION_MAX_BYTES;
+        scratch.return_equation(equation);
+    }
+    let mut workspace = scratch.lease_workspace();
+    runtime.provision_workspace(&mut workspace, per_proof * proofs);
+    plan.workspace_bytes = workspace.retained_bytes();
+    plan.retention_eligible &= plan.workspace_bytes <= tuning::VERIFIER_WORKSPACE_MAX_BYTES;
+    scratch.return_workspace(workspace);
+    plan
+}
+
+impl VerifierRuntime {
+    /// Grows a final-MSM workspace for a batch carrying `dynamic_points`
+    /// transcript commitments. Planning inspects scalar shapes, so the
+    /// synthetic input uses full-width scalars to match a real batch's
+    /// geometry; `prepare` provisions every bank and scratch bundle without
+    /// executing arithmetic, and the dropped [`super::commitment::Batch`]
+    /// leaves all retained leases in place. A real batch's own `prepare`
+    /// still plans normally and tops up any residual mismatch.
+    fn provision_workspace(&self, workspace: &mut MsmWorkspace, dynamic_points: usize) {
+        let points =
+            vec![PreparedAffinePoint::from_affine(&VestaAffine::GENERATOR); dynamic_points];
+        let scalars = vec![<Fp>::ZERO.sub(&<Fp>::ONE); N.max(dynamic_points)];
+        let bases = Bases::AlphaPrepared(AlphaTable::bind(self.codebook.view(), &self.vk_bases));
+        let budget = self.msm_budget(dynamic_points);
+        let slice = slice_len(budget.get(), dynamic_points);
+        let mut inputs = vec![
+            Input::new(self.srs.coefficient_bases(), &scalars[..N]),
+            Input::new(
+                bases.range(0..VERIFIER_POINT_COUNT),
+                &scalars[..VERIFIER_POINT_COUNT],
+            ),
+            Input::new(
+                self.srs.lagrange_bases().range(0..INSTANCE_VALUE_COUNT),
+                &scalars[..INSTANCE_VALUE_COUNT],
+            ),
+        ];
+        inputs.extend(
+            points
+                .chunks(slice)
+                .zip(scalars[..dynamic_points].chunks(slice))
+                .map(|(points, scalars)| Input::new(Bases::Prepared(points), scalars)),
+        );
+        let _ = workspace.prepare(&inputs, budget);
+    }
 }
 
 /// Decodes every point in a proof ahead of transcript reading.
@@ -329,6 +685,8 @@ pub(crate) fn verify(
     if requests.is_empty() {
         return Ok(());
     }
+    #[cfg(test)]
+    let mut timing = timing::Recorder::begin();
     // Sample before executor initialization and scratch acquisition. The first
     // proof has weight one; each later equation receives an independent weight.
     let mut weights = vec![<Fp>::ONE; requests.len()];
@@ -341,28 +699,129 @@ pub(crate) fn verify(
         }
     }
     let runtime = VerifierRuntime::get();
-    let results = runtime.executor.run(|executor| {
-        let execution = Execution::new(executor, runtime.executor.budget());
-        // Bounded number of worker-local fixed banks, independent of batch size.
-        let workers = execution.budget.get();
-        let chunk = requests.len().div_ceil(workers);
-        execution.map(
-            requests.chunks(chunk).zip(weights.chunks(chunk)),
-            |(requests, weights), _| {
-                let mut equation = Equation::new();
-                for (request, &weight) in requests.iter().zip(weights) {
-                    equation.proof(request, weight, &runtime.instance_generators)?;
-                }
-                Ok::<_, Error>(equation)
-            },
-        )
-    });
-    let mut results = results.into_iter();
-    let mut combined = results.next().expect("nonempty verification batch")?;
-    for result in results {
-        combined.merge(result?);
+    let total_actions = requests.iter().map(|r| r.statements.len()).sum();
+    let jobs = fold_jobs(runtime.fold_cap(), requests.len(), total_actions);
+    #[cfg(test)]
+    {
+        timing.mark(timing::Stage::Weights);
+        timing.facts.fold_jobs = jobs;
     }
-    runtime.check(&combined)
+    let combined = if jobs == 1 {
+        // The cheap path for tiny batches: fold on the calling thread without
+        // entering the pool scheduler. The final MSM still uses the pool.
+        let equation = fold_chunk(
+            runtime,
+            requests,
+            &weights,
+            #[cfg(test)]
+            &timing,
+        )?;
+        #[cfg(test)]
+        timing.mark(timing::Stage::Fold);
+        equation
+    } else {
+        let chunk = requests.len().div_ceil(jobs);
+        #[cfg(test)]
+        {
+            timing.facts.fold_chunk = chunk;
+        }
+        #[cfg(test)]
+        let fold_timing = &timing;
+        let results = runtime.executor.run(|executor| {
+            // Bounded number of worker-local fixed banks, chosen by the
+            // batch's folding work rather than the full worker budget.
+            let execution = Execution::new(executor, TaskBudget::new(jobs).expect("nonzero jobs"));
+            execution.map(
+                requests.chunks(chunk).zip(weights.chunks(chunk)),
+                |(requests, weights), _| {
+                    fold_chunk(
+                        runtime,
+                        requests,
+                        weights,
+                        #[cfg(test)]
+                        fold_timing,
+                    )
+                },
+            )
+        });
+        #[cfg(test)]
+        timing.mark(timing::Stage::Fold);
+        // Drain every chunk result — returning each merged shell to the pool —
+        // before reporting the batch's first error, so failures keep scratch.
+        // The first equation absorbs the rest: sizing it once keeps its
+        // capacity exact, so whether it returns to the pool follows the
+        // batch's size rather than amortized growth past the ceiling.
+        let points: usize = results.iter().flatten().map(|e| e.points.len()).sum();
+        let mut combined: Option<Equation> = None;
+        let mut failure = None;
+        for result in results {
+            match result {
+                Ok(mut equation) => match &mut combined {
+                    Some(combined) => {
+                        combined.merge(&mut equation);
+                        runtime.scratch.return_equation(equation);
+                    }
+                    None => {
+                        let extra = points - equation.points.len();
+                        equation.points.reserve_exact(extra);
+                        equation.scalars.reserve_exact(extra);
+                        combined = Some(equation);
+                    }
+                },
+                Err(error) => failure = failure.or(Some(error)),
+            }
+        }
+        if let Some(error) = failure {
+            if let Some(combined) = combined {
+                runtime.scratch.return_equation(combined);
+            }
+            return Err(error);
+        }
+        #[cfg(test)]
+        timing.mark(timing::Stage::Merge);
+        combined.expect("nonempty verification batch")
+    };
+    let result = runtime.check(
+        &combined,
+        #[cfg(test)]
+        &mut timing,
+    );
+    runtime.scratch.return_equation(combined);
+    #[cfg(test)]
+    {
+        timing.mark(timing::Stage::Return);
+        timing.finish();
+    }
+    result
+}
+
+/// Folds one worker chunk into an equation leased from the runtime's pool,
+/// returning the lease before reporting a rejected proof.
+fn fold_chunk(
+    runtime: &VerifierRuntime,
+    requests: &[VerificationRequest<'_>],
+    weights: &[Fp],
+    #[cfg(test)] timing: &timing::Recorder,
+) -> Result<Equation, Error> {
+    #[cfg(test)]
+    let started = timing.fold.start();
+    let mut equation = runtime.scratch.lease_equation();
+    for (request, &weight) in requests.iter().zip(weights) {
+        let folded = equation.proof_with(
+            request,
+            weight,
+            &runtime.instance_generators,
+            #[cfg(test)]
+            Some(&timing.prefetch),
+        );
+        if let Err(error) = folded {
+            runtime.scratch.return_equation(equation);
+            return Err(error);
+        }
+    }
+    #[cfg(test)]
+    timing.fold.record(started);
+    Ok(equation)
 }
 
 struct Equation {
@@ -386,13 +845,39 @@ impl Equation {
             challenges: Vec::new(),
         }
     }
-    fn merge(&mut self, other: Self) {
+    /// Folds `other` into `self`, draining its points and scalars so the
+    /// emptied shell keeps its capacity for the scratch pool.
+    fn merge(&mut self, other: &mut Self) {
         self.versions |= other.versions;
-        for (a, b) in self.fixed.iter_mut().zip(other.fixed) {
-            *a = a.add(&b);
+        for (a, b) in self.fixed.iter_mut().zip(&other.fixed) {
+            *a = a.add(b);
         }
-        self.points.extend(other.points);
-        self.scalars.extend(other.scalars);
+        self.points.append(&mut other.points);
+        self.scalars.append(&mut other.scalars);
+    }
+    /// Restores the leased-equation state `new` produces, keeping capacity.
+    fn reset(&mut self) {
+        self.versions = 0;
+        self.fixed.fill(<Fp>::ZERO);
+        self.points.clear();
+        self.scalars.clear();
+        #[cfg(test)]
+        self.challenges.clear();
+    }
+    /// Retained capacity in bytes, for the pool's per-entry ceiling.
+    fn retained_bytes(&self) -> usize {
+        self.fixed.capacity() * size_of::<Fp>()
+            + self.points.capacity() * size_of::<PreparedAffinePoint<Vesta>>()
+            + self.scalars.capacity() * size_of::<Fp>()
+            + self.challenge_bytes()
+    }
+    #[cfg(test)]
+    fn challenge_bytes(&self) -> usize {
+        self.challenges.capacity() * size_of::<[u8; 32]>()
+    }
+    #[cfg(not(test))]
+    fn challenge_bytes(&self) -> usize {
+        0
     }
     fn point(&mut self, reader: &mut Reader<'_>) -> Result<usize, Error> {
         let index = self.points.len();
@@ -408,14 +893,30 @@ impl Equation {
         }
         Ok(indices)
     }
+    #[cfg(test)]
     fn proof(
         &mut self,
         request: &VerificationRequest<'_>,
         weight: Fp,
         generators: &[FixedGenerator],
     ) -> Result<(), Error> {
+        self.proof_with(request, weight, generators, None)
+    }
+    fn proof_with(
+        &mut self,
+        request: &VerificationRequest<'_>,
+        weight: Fp,
+        generators: &[FixedGenerator],
+        #[cfg(test)] prefetch: Option<&crate::native::task_stats::TaskStats>,
+    ) -> Result<(), Error> {
+        #[cfg(test)]
+        let started = prefetch.and_then(crate::native::task_stats::TaskStats::start);
         let decoded =
             prefetch_points(request.proof, request.statements.len()).ok_or(Error::InvalidProof)?;
+        #[cfg(test)]
+        if let Some(prefetch) = prefetch {
+            prefetch.record(started);
+        }
         let mut reader = Reader::with_decoded(request.proof, &decoded);
         let version = request.version;
         self.versions |= 1 << version.index();
@@ -917,3 +1418,5 @@ fn multiopen_evaluation(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(super) mod timing;
