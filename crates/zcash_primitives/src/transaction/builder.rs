@@ -862,6 +862,8 @@ pub struct PcztParts<P: consensus::Parameters> {
 
 /// Generates a [`Transaction`] from its inputs and outputs.
 pub struct Builder<P, U> {
+    #[cfg(feature = "circuits")]
+    proof_cancellation: orchard::circuit::ProofCancellation,
     params: P,
     tx_version: TxVersion,
     consensus_branch_id: BranchId,
@@ -1050,6 +1052,8 @@ impl<P: consensus::Parameters> Builder<P, ()> {
         };
 
         Builder {
+            #[cfg(feature = "circuits")]
+            proof_cancellation: Default::default(),
             params,
             tx_version,
             consensus_branch_id,
@@ -1065,6 +1069,17 @@ impl<P: consensus::Parameters> Builder<P, ()> {
         }
     }
 
+    /// Sets a cooperative cancellation signal for Orchard and Ironwood proofs.
+    /// Cancellation does not interrupt shared proving-key initialization.
+    #[cfg(feature = "circuits")]
+    pub fn with_proof_cancellation(
+        mut self,
+        cancellation: orchard::circuit::ProofCancellation,
+    ) -> Self {
+        self.proof_cancellation = cancellation;
+        self
+    }
+
     /// Sets the notifier channel, where progress of building the transaction is sent.
     ///
     /// An update is sent after every Sapling Spend or Output is computed, and the `u32`
@@ -1077,6 +1092,8 @@ impl<P: consensus::Parameters> Builder<P, ()> {
         _progress_notifier: Sender<Progress>,
     ) -> Builder<P, Sender<Progress>> {
         Builder {
+            #[cfg(feature = "circuits")]
+            proof_cancellation: self.proof_cancellation,
             params: self.params,
             tx_version: self.tx_version,
             consensus_branch_id: self.consensus_branch_id,
@@ -1766,10 +1783,11 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         let orchard_bundle = unauthed_tx
             .orchard_bundle
             .map(|b| {
-                b.create_proof(
+                b.create_proof_cancellable(
                     orchard_proving_key
                         .expect("proving key is built when an Orchard bundle is present"),
                     &mut rng,
+                    &self.proof_cancellation,
                 )
                 .and_then(|b| {
                     b.apply_signatures(&mut rng, *shielded_sig_commitment.as_ref(), orchard_saks)
@@ -1781,10 +1799,11 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         let ironwood_bundle = unauthed_tx
             .ironwood_bundle
             .map(|b| {
-                b.create_proof(
+                b.create_proof_cancellable(
                     orchard_proving_key
                         .expect("proving key is built when an Ironwood bundle is present"),
                     &mut rng,
+                    &self.proof_cancellation,
                 )
                 .and_then(|b| {
                     // Ironwood actions use the Orchard bundle type and the same
@@ -2979,6 +2998,8 @@ mod tests {
         // Create a builder with 0 fee, so we can construct t outputs
         let consensus_branch_id = BranchId::for_height(&TEST_NETWORK, sapling_activation_height);
         let mut builder = builder::Builder {
+            #[cfg(feature = "circuits")]
+            proof_cancellation: Default::default(),
             params: TEST_NETWORK,
             tx_version: TxVersion::suggested_for_branch(consensus_branch_id),
             consensus_branch_id,

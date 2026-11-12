@@ -384,6 +384,24 @@ impl Proof {
         proof.map(Proof).map_err(prover_error)
     }
 
+    #[cfg(feature = "prover")]
+    pub(crate) fn create_cancellable(
+        pk: &ProvingKey,
+        circuits: &[Circuit],
+        instances: &[Instance],
+        rng: impl Rng,
+        cancellation: &super::ProofCancellation,
+    ) -> Result<Self, ProofError> {
+        if cancellation.is_cancelled() {
+            return Err(ProofError::Cancelled);
+        }
+        let proof = Self::create(pk, circuits, instances, rng)?;
+        if cancellation.is_cancelled() {
+            return Err(ProofError::Cancelled);
+        }
+        Ok(proof)
+    }
+
     /// Verifies a proof for the selected protocol version and ordered statements.
     ///
     /// Verification reads the canonical proof from the front of the bytes and ignores
