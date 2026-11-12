@@ -104,6 +104,59 @@ pub struct MSM<'a, C: CurveAffine> {
     // Batch reduction moves arbitrary terms here and canonicalizes them once
     // before the final multiscalar multiplication.
     batched_other: Vec<ArbitraryTerm<C>>,
+    // Scalars of the batch's known points (see [`KnownTerms`]), taken out of
+    // `batched_other`. When present, `batched_other` holds only terms that
+    // need no coalescing, and evaluation skips the batch-wide sort.
+    known: Option<KnownScalars<C>>,
+}
+
+/// A batch's [`KnownTerms`] and one accumulated scalar per known point.
+type KnownScalars<C> = (
+    std::sync::Arc<KnownTerms<C>>,
+    Vec<<C as CurveAffine>::ScalarExt>,
+);
+
+/// Below this many proof-specific terms, a batch with [`KnownTerms`] still
+/// sorts its terms by x-coordinate before the MSM.
+const SORTED_KNOWN_BATCH_TERMS: usize = 2048;
+
+/// Points that recur in every proof of a batch (a verifying key's fixed and
+/// permutation commitments), indexed by canonical x-coordinate. Each proof's
+/// terms at these points are summed into one scalar per point, so the batch's
+/// remaining terms, at proof-specific points, need no coalescing: a repeated
+/// point there is still a correct MSM term.
+#[derive(Debug)]
+pub(crate) struct KnownTerms<C: CurveAffine> {
+    keys: Vec<(CanonicalFieldKey<C::Base>, usize)>,
+    points: Vec<(C::Base, C::Base)>,
+}
+
+impl<C: CurveAffine> KnownTerms<C> {
+    pub(crate) fn new(points: impl IntoIterator<Item = C>) -> Self {
+        let mut keys: Vec<(CanonicalFieldKey<C::Base>, usize)> = Vec::new();
+        let mut xy = Vec::new();
+        for point in points {
+            if bool::from(point.is_identity()) {
+                continue;
+            }
+            let coordinates = point.coordinates().unwrap();
+            keys.push((CanonicalFieldKey::new(*coordinates.x()), xy.len()));
+            xy.push((*coordinates.x(), *coordinates.y()));
+        }
+        keys.sort_by_key(|key| key.0);
+        // A point repeated (or negated) in the key keeps its first index;
+        // `extract_known` matches terms by x-coordinate and folds a negated
+        // point's scalar in with the opposite sign.
+        keys.dedup_by(|a, b| a.0 == b.0);
+        Self { keys, points: xy }
+    }
+
+    fn find(&self, x: &CanonicalFieldKey<C::Base>) -> Option<usize> {
+        self.keys
+            .binary_search_by(|(key, _)| key.cmp(x))
+            .ok()
+            .map(|i| self.keys[i].1)
+    }
 }
 
 fn canonicalize_other<C: CurveAffine>(mut terms: Vec<ArbitraryTerm<C>>) -> Vec<ArbitraryTerm<C>> {
@@ -159,34 +212,24 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
             u_scalar,
             other,
             batched_other,
+            known: None,
         }
-    }
-
-    fn add_other(&mut self, x: C::Base, scalar: C::Scalar, y: C::Base) {
-        self.add_other_key(CanonicalFieldKey::new(x), scalar, y);
-    }
-
-    fn add_other_key(&mut self, x: CanonicalFieldKey<C::Base>, scalar: C::Scalar, y: C::Base) {
-        self.other
-            .entry(x)
-            .and_modify(|(our_scalar, our_y)| {
-                if *our_y == y {
-                    *our_scalar += scalar;
-                } else {
-                    assert!(*our_y == -y);
-                    *our_scalar -= scalar;
-                }
-            })
-            .or_insert((scalar, y));
     }
 
     /// Add another multiexp into this one
     pub fn add_msm(&mut self, other: &Self) {
-        for (x, (scalar, y)) in other.other.iter() {
-            self.add_other_key(*x, *scalar, *y);
-        }
-        for (x, (scalar, y)) in other.batched_other.iter() {
-            self.add_other_key(*x, *scalar, *y);
+        // Terms at equal x-coordinates are coalesced once, when the MSM is
+        // evaluated (see `canonicalize_other`).
+        self.batched_other
+            .reserve(other.other.len() + other.batched_other.len());
+        self.batched_other
+            .extend(other.other.iter().map(|(x, values)| (*x, *values)));
+        self.batched_other.extend_from_slice(&other.batched_other);
+        if let Some((known, scalars)) = &other.known {
+            for ((x, y), scalar) in known.points.iter().zip(scalars) {
+                self.batched_other
+                    .push((CanonicalFieldKey::new(*x), (*scalar, *y)));
+            }
         }
 
         if let Some(g_scalars) = &other.g_scalars {
@@ -211,8 +254,21 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
             u_scalar,
             other,
             batched_other,
+            known,
             ..
         } = other;
+        if let Some((terms, scalars)) = known {
+            match &mut self.known {
+                Some((our_terms, ours)) => {
+                    // The scalars are indexed by the points of one `KnownTerms`.
+                    debug_assert!(std::sync::Arc::ptr_eq(our_terms, &terms));
+                    for (our, scalar) in ours.iter_mut().zip(scalars) {
+                        *our += scalar;
+                    }
+                }
+                None => self.known = Some((terms, scalars)),
+            }
+        }
 
         self.batched_other
             .reserve(other.len() + batched_other.len());
@@ -238,13 +294,56 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         }
     }
 
+    /// Moves this MSM's terms at `known` points into one scalar per point
+    /// (see [`KnownTerms`]); evaluation then skips coalescing the rest.
+    pub(crate) fn extract_known(&mut self, known: &std::sync::Arc<KnownTerms<C>>) {
+        debug_assert!(self.other.is_empty());
+        let mut scalars = match self.known.take() {
+            Some((terms, scalars)) => {
+                debug_assert!(std::sync::Arc::ptr_eq(&terms, known));
+                scalars
+            }
+            None => vec![C::Scalar::ZERO; known.points.len()],
+        };
+        self.batched_other
+            .retain(|(x, (scalar, y))| match known.find(x) {
+                Some(index) => {
+                    if known.points[index].1 == *y {
+                        scalars[index] += scalar;
+                    } else {
+                        // Valid curve points with equal x-coordinates have
+                        // equal or opposite y-coordinates.
+                        debug_assert!(known.points[index].1 == -*y);
+                        scalars[index] -= scalar;
+                    }
+                    false
+                }
+                None => true,
+            });
+        self.known = Some((std::sync::Arc::clone(known), scalars));
+    }
+
+    /// Returns the known points' scalars to ordinary terms.
+    #[cfg(any(feature = "orbits", feature = "unstable-verifier-fingerprint"))]
+    fn restore_known(&mut self) {
+        if let Some((known, scalars)) = self.known.take() {
+            for ((x, y), scalar) in known.points.iter().zip(scalars) {
+                self.batched_other
+                    .push((CanonicalFieldKey::new(*x), (scalar, *y)));
+            }
+        }
+    }
+
     /// Add arbitrary term (the scalar and the point)
     pub fn append_term(&mut self, scalar: C::Scalar, point: C) {
         if !bool::from(point.is_identity()) {
             let xy = point.coordinates().unwrap();
             let x = *xy.x();
             let y = *xy.y();
-            self.add_other(x, scalar, y);
+            // Coalesced with any other term at the same x-coordinate when the
+            // MSM is evaluated (see `canonicalize_other`).
+            self.batched_other
+                .push((CanonicalFieldKey::new(x), (scalar, y)));
         }
     }
 
@@ -313,6 +412,11 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         for (_, (scalar, _)) in self.batched_other.iter_mut() {
             *scalar *= factor;
         }
+        if let Some((_, scalars)) = &mut self.known {
+            for scalar in scalars {
+                *scalar *= factor;
+            }
+        }
 
         self.w_scalar = self.w_scalar.map(|a| a * &factor);
         self.u_scalar = self.u_scalar.map(|a| a * &factor);
@@ -326,9 +430,25 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
             u_scalar,
             other,
             mut batched_other,
+            known,
         } = self;
 
-        let other_len = if batched_other.is_empty() {
+        let other_len = if let Some((known, scalars)) = known {
+            // The proof-specific terms need no coalescing (see `KnownTerms`).
+            batched_other.extend(other.iter().map(|(x, values)| (*x, *values)));
+            for ((x, y), scalar) in known.points.iter().zip(scalars) {
+                if !bool::from(scalar.is_zero()) {
+                    batched_other.push((CanonicalFieldKey::new(*x), (scalar, *y)));
+                }
+            }
+            // A small batch's terms are cheap to sort, and its multi-worker
+            // MSM measured faster over x-sorted bases (Zen 4, 4 workers,
+            // 1-4 bundles: -6%); a large batch keeps the sort's savings.
+            if batched_other.len() <= SORTED_KNOWN_BATCH_TERMS {
+                batched_other.sort_by_key(|term| term.0);
+            }
+            batched_other.len()
+        } else if batched_other.is_empty() {
             other.len()
         } else {
             batched_other.extend(other.iter().map(|(x, values)| (*x, *values)));
@@ -396,6 +516,9 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
 
     #[cfg_attr(not(feature = "orbits"), allow(unused_mut))]
     fn eval_with_profile(mut self, scalar_profile: ScalarProfile) -> bool {
+        // The prepared zero-check below coalesces every arbitrary term.
+        #[cfg(feature = "orbits")]
+        self.restore_known();
         // A prepared fixed-base zero-check over [g..., w, u] (built by
         // `Params::prepare_zero_checks`, under the opt-in `orbits`
         // feature) evaluates the identity test
@@ -495,14 +618,17 @@ impl<'a, C: CurveAffine> MSM<'a, C> {
         Option<C::Scalar>,
         Vec<(C::Scalar, C::Base, C::Base)>,
     ) {
-        let mut other = self
+        let mut this = self.clone();
+        this.restore_known();
+        let this = &this;
+        let mut other = this
             .other
             .iter()
             .map(|(x, (scalar, y))| (*scalar, x.value, *y))
             .collect::<Vec<_>>();
-        if !self.batched_other.is_empty() {
-            let mut combined = self.batched_other.clone();
-            combined.extend(self.other.iter().map(|(x, values)| (*x, *values)));
+        if !this.batched_other.is_empty() {
+            let mut combined = this.batched_other.clone();
+            combined.extend(this.other.iter().map(|(x, values)| (*x, *values)));
             other = canonicalize_other::<C>(combined)
                 .into_iter()
                 .map(|(x, (scalar, y))| (scalar, x.value, y))
@@ -553,6 +679,90 @@ mod tests {
             .chain([Fq::from(0), Fq::from(1)])
             .collect::<Vec<_>>();
         assert_cached_key_order(&vesta_xs);
+    }
+
+    /// Terms at repeated and negated points, known or not, survive
+    /// `extract_known`, `add_msm`, `add_msm_batch` and `scale` uncoalesced
+    /// and still sum exactly, both below the small-batch sort threshold and
+    /// above it (where the unsorted terms reach the GLV MSM as they are).
+    #[test]
+    fn known_terms_with_repeated_and_negated_points_sum_exactly() {
+        use super::{KnownTerms, SORTED_KNOWN_BATCH_TERMS};
+        use pasta_curves::Ep;
+        use rand::{RngExt, SeedableRng};
+        use std::sync::Arc;
+
+        let params = Params::<EpAffine>::new(4);
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let random = |rng: &mut rand::rngs::StdRng| Ep::random(rng).to_affine();
+        let (k1, k2) = (random(&mut rng), random(&mut rng));
+        // The key itself repeats and negates a point.
+        let known = Arc::new(KnownTerms::new([k1, k2, k1, -k2]));
+        let distinct: Vec<EpAffine> = (0..8).map(|_| random(&mut rng)).collect();
+        let pool: Vec<EpAffine> = [k1, -k1, k2, -k2]
+            .into_iter()
+            .chain(distinct.iter().copied())
+            .chain(distinct.iter().map(|p| -*p))
+            .collect();
+
+        for terms in [40, SORTED_KNOWN_BATCH_TERMS + 64] {
+            let mut expected = Ep::identity();
+            let proof_msm = |rng: &mut rand::rngs::StdRng, expected: &mut Ep| {
+                let mut msm = MSM::new(&params);
+                for _ in 0..terms / 2 {
+                    let point = pool[rng.random_range(0..pool.len())];
+                    let scalar = Fq::random(&mut *rng);
+                    msm.append_term(scalar, point);
+                    *expected += point * scalar;
+                }
+                msm.extract_known(&known);
+                msm
+            };
+            let mut batch = proof_msm(&mut rng, &mut expected);
+            let other = proof_msm(&mut rng, &mut expected);
+            batch.add_msm_batch(other);
+
+            // `add_msm` and `scale` on a known-term MSM.
+            let mut scaled = proof_msm(&mut rng, &mut Ep::identity());
+            let factor = Fq::random(&mut rng);
+            let mut scaled_expected = Ep::identity();
+            for (scalar, base) in scaled
+                .clone()
+                .multiexp_terms()
+                .0
+                .iter()
+                .zip(scaled.clone().multiexp_terms().1)
+            {
+                scaled_expected += base * (*scalar * factor);
+            }
+            scaled.scale(factor);
+            let mut combined = MSM::new(&params);
+            combined.add_msm(&scaled);
+            assert_eq!(combined.multiexp(), scaled_expected, "terms={terms}");
+
+            assert_eq!(batch.clone().multiexp(), expected, "terms={terms}");
+            // Extracting again after more terms arrive keeps the sum.
+            let extra = random(&mut rng);
+            batch.append_term(Fq::ONE, k1);
+            batch.append_term(Fq::ONE, extra);
+            batch.extract_known(&known);
+            assert_eq!(
+                batch.clone().multiexp(),
+                expected + k1 + extra,
+                "terms={terms}"
+            );
+
+            // The batch check itself: cancelling the sum gives the identity,
+            // and a perturbed scalar does not.
+            let target = (expected + k1 + extra).to_affine();
+            let mut cancelled = batch.clone();
+            cancelled.append_term(-Fq::ONE, target);
+            assert!(cancelled.eval(), "terms={terms}");
+            let mut perturbed = batch;
+            perturbed.append_term(-Fq::ONE, target);
+            perturbed.append_term(Fq::ONE, k2);
+            assert!(!perturbed.eval(), "terms={terms}");
+        }
     }
 
     fn cancelling_full_width_msm(params: &Params<EpAffine>) -> MSM<'_, EpAffine> {

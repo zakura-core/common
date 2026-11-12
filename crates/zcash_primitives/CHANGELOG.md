@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.4.0] - 2026-11-10
+
+### Changed
+
+- Sped up reading Orchard bundles by decoding all of a bundle's Action points
+  together; when a bundle has several errors, the one reported may differ
+  ([#731](https://github.com/zakura-core/common/pull/731)).
+
 ## [5.0.0] - 2026-11-02
 
 ### Added

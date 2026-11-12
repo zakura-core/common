@@ -544,6 +544,14 @@ where
         }
 
         let items = self.items;
+        // The verifying key's commitments recur in every proof; summing their
+        // scalars per proof lets the final MSM skip coalescing the rest.
+        let known = Arc::new(crate::poly::commitment::KnownTerms::new(
+            vk.fixed_commitments
+                .iter()
+                .chain(vk.permutation.commitments())
+                .copied(),
+        ));
         let instance_commitments = match compute_batch_instance_commitments(params, vk, &items) {
             Ok(instance_commitments) => instance_commitments,
             Err(_) => return false,
@@ -593,6 +601,10 @@ where
                     instance_commitments,
                     &mut transcript,
                 );
+                let mut result = result;
+                if let Ok(msm) = &mut result {
+                    msm.extract_known(&known);
+                }
                 // `Ok` means the transcript was read completely; the proof's
                 // validity is decided by the final MSM check.
                 if result.is_ok() {

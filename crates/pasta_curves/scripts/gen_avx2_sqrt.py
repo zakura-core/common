@@ -88,55 +88,12 @@ def gen(name, square):
     return "\n".join(out) + "\n"
 
 
-def gen_mul_macro():
-    """The product as a macro, so kernels that need it inlined can expand it:
-    `#[inline(always)]` is unavailable on `#[target_feature]` functions, and
-    LLVM keeps `mul` out of line."""
-    body = gen("mul", False).splitlines()
-    # Keep the inner block of the generated function.
-    start = body.index("    {")
-    inner = body[start:-1]
-    paths = {
-        "MASK": "$crate::arithmetic::avx2_sqrt::MASK",
-        "::<BITS>": "::<{ $crate::arithmetic::avx2_sqrt::BITS }>",
-        "[zero; L]": "[zero; $crate::arithmetic::avx2_sqrt::L]",
-        "V(out)": "$crate::arithmetic::avx2_sqrt::V(out)",
-    }
-    out = [
-        "/// The body of [`mul`] as a macro, for kernels that need it inlined:",
-        "/// `#[inline(always)]` is unavailable on `#[target_feature]` functions,",
-        "/// and LLVM keeps `mul` out of line, passing its nine-limb operands",
-        "/// through memory. Expand it only inside functions that enable AVX2, with",
-        "/// the `core::arch::x86_64` intrinsics in scope.",
-        "macro_rules! mul29 {",
-        "    ($a:expr, $b:expr, $P0:expr, $P1:expr, $P2:expr, $P3:expr) => {{",
-        "        let p = const { $crate::arithmetic::avx2_sqrt::pasta_limbs29(&[$P0, $P1, $P2, $P3]) };",
-        "        let a: &$crate::arithmetic::avx2_sqrt::V = $a;",
-        "        let b: &$crate::arithmetic::avx2_sqrt::V = $b;",
-    ]
-    for line in inner:
-        for k, v in paths.items():
-            line = line.replace(k, v)
-        out.append("    " + line)
-    out.append("    }};")
-    out.append("}")
-    out.append("pub(crate) use mul29;")
-    out.append("")
-    out.append("/// Lane-wise Montgomery product.")
-    out.append('#[target_feature(enable = "avx2")]')
-    out.append("#[inline]")
-    out.append("pub(super) fn mul<const P0: u64, const P1: u64, const P2: u64, const P3: u64>(a: &V, b: &V) -> V {")
-    out.append("    mul29!(a, b, P0, P1, P2, P3)")
-    out.append("}")
-    return "\n".join(out) + "\n"
-
-
 def main():
     path = pathlib.Path(__file__).resolve().parent.parent / "src/arithmetic/avx2_sqrt.rs"
     src = path.read_text()
     head, rest = src.split(BEGIN)
     _, tail = rest.split(END)
-    body = gen_mul_macro() + "\n" + gen("sqr", True)
+    body = gen("mul", False) + "\n" + gen("sqr", True)
     new = head + BEGIN + body + END + tail
     if "--check" in sys.argv:
         import subprocess, tempfile

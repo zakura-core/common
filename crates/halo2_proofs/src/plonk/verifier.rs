@@ -307,7 +307,13 @@ fn verify_proof_with_instance_commitments<
         // Fixed evaluations are shared across every circuit in this proof.
         // Compute their pure gate subexpressions once, then reuse the same
         // scratch slots for each circuit's advice and instance evaluations.
-        let mut gate_values = vk.verifier_expressions.common_values(&fixed_evals);
+        let gate_values = vk.verifier_expressions.common_values(&fixed_evals);
+        let gate_roots = vk.verifier_expressions.evaluate_all(
+            &gate_values,
+            &fixed_evals,
+            &advice_evals.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+            &instance_evals.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        );
 
         // Compute the expected value of h(x)
         let expressions = advice_evals
@@ -315,48 +321,45 @@ fn verify_proof_with_instance_commitments<
             .zip(instance_evals.iter())
             .zip(permutations_evaluated.iter())
             .zip(lookups_evaluated.iter())
-            .flat_map(|(((advice_evals, instance_evals), permutation), lookups)| {
-                let fixed_evals = &fixed_evals;
-                let gates = vk.verifier_expressions.evaluate(
-                    &mut gate_values,
-                    fixed_evals,
-                    advice_evals,
-                    instance_evals,
-                );
-                std::iter::empty()
-                    // Evaluate the circuit using the custom gates provided
-                    .chain(gates)
-                    .chain(permutation.expressions(
-                        vk,
-                        &vk.cs.permutation,
-                        &permutations_common,
-                        advice_evals,
-                        fixed_evals,
-                        instance_evals,
-                        l_0,
-                        l_last,
-                        l_blind,
-                        beta,
-                        gamma,
-                        x,
-                    ))
-                    .chain(lookups.iter().zip(vk.cs.lookups.iter()).flat_map(
-                        move |(p, argument)| {
-                            p.expressions(
-                                l_0,
-                                l_last,
-                                l_blind,
-                                argument,
-                                theta,
-                                beta,
-                                gamma,
-                                advice_evals,
-                                fixed_evals,
-                                instance_evals,
-                            )
-                        },
-                    ))
-            });
+            .zip(gate_roots)
+            .flat_map(
+                |((((advice_evals, instance_evals), permutation), lookups), gates)| {
+                    let fixed_evals = &fixed_evals;
+                    std::iter::empty()
+                        // Evaluate the circuit using the custom gates provided
+                        .chain(gates)
+                        .chain(permutation.expressions(
+                            vk,
+                            &vk.cs.permutation,
+                            &permutations_common,
+                            advice_evals,
+                            fixed_evals,
+                            instance_evals,
+                            l_0,
+                            l_last,
+                            l_blind,
+                            beta,
+                            gamma,
+                            x,
+                        ))
+                        .chain(lookups.iter().zip(vk.cs.lookups.iter()).flat_map(
+                            move |(p, argument)| {
+                                p.expressions(
+                                    l_0,
+                                    l_last,
+                                    l_blind,
+                                    argument,
+                                    theta,
+                                    beta,
+                                    gamma,
+                                    advice_evals,
+                                    fixed_evals,
+                                    instance_evals,
+                                )
+                            },
+                        ))
+                },
+            );
 
         vanishing.verify(params, expressions, y, xn)
     };

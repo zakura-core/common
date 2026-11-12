@@ -275,6 +275,116 @@ pub(crate) mod testing {
     }
 }
 
+/// Errors from [`Action::batch_from_encodings`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ActionDecodeError {
+    /// `cv_net` does not encode a Pallas point.
+    InvalidCvNet,
+    /// `rk` does not encode a Pallas point.
+    InvalidRk,
+    /// The decoded parts do not form an Action (see [`Action::from_parts`]).
+    Parts(ActionFromPartsError),
+}
+
+impl fmt::Display for ActionDecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ActionDecodeError::InvalidCvNet => {
+                write!(
+                    f,
+                    "an Orchard action's `cv_net` is not a valid Pallas point"
+                )
+            }
+            ActionDecodeError::InvalidRk => {
+                write!(f, "an Orchard action's `rk` is not a valid Pallas point")
+            }
+            ActionDecodeError::Parts(e) => e.fmt(f),
+        }
+    }
+}
+
+impl core::error::Error for ActionDecodeError {}
+
+/// An Action's wire encodings before point decoding: what
+/// [`Action::batch_from_encodings`] consumes.
+#[derive(Clone, Debug)]
+pub struct ActionEncoding {
+    /// The encoding of `cv_net`.
+    pub cv_net: [u8; 32],
+    /// The nullifier of the note being spent.
+    pub nf: Nullifier,
+    /// The encoding of `rk`.
+    pub rk: [u8; 32],
+    /// The commitment to the new note being created.
+    pub cmx: ExtractedNoteCommitment,
+    /// The transmitted note ciphertext.
+    pub encrypted_note: TransmittedNoteCiphertext,
+}
+
+impl Action<()> {
+    /// [`Action::from_parts`] for many Actions read from the wire, decoding
+    /// every Action's `cv_net`, `rk` and `epk` together. Pasta's batch
+    /// decoder runs eight square roots in AVX2 lanes where available, so a
+    /// bundle's points decode in about the time of two separate decodes.
+    ///
+    /// The result is exactly that of decoding each encoding and calling
+    /// [`Action::from_parts`] in order: the first failing Action's error is
+    /// returned.
+    pub fn batch_from_encodings(
+        encodings: alloc::vec::Vec<ActionEncoding>,
+    ) -> Result<alloc::vec::Vec<Action<()>>, ActionDecodeError> {
+        #[cfg(feature = "backend-halo2")]
+        {
+            let points = pallas::Affine::batch_from_bytes(
+                encodings
+                    .iter()
+                    .flat_map(|e| [e.cv_net, e.rk, e.encrypted_note.epk_bytes]),
+            );
+            let mut points = points.into_iter();
+            encodings
+                .into_iter()
+                .map(|e| {
+                    let cv_net = Option::<pallas::Affine>::from(points.next().unwrap())
+                        .ok_or(ActionDecodeError::InvalidCvNet)?;
+                    let rk = Option::<pallas::Affine>::from(points.next().unwrap())
+                        .ok_or(ActionDecodeError::InvalidRk)?;
+                    let epk = Option::<pallas::Affine>::from(points.next().unwrap())
+                        .ok_or(ActionDecodeError::Parts(ActionFromPartsError::InvalidEpk))?;
+                    if bool::from(rk.is_identity()) {
+                        return Err(ActionDecodeError::Parts(ActionFromPartsError::IdentityRk));
+                    }
+                    if bool::from(epk.is_identity()) {
+                        return Err(ActionDecodeError::Parts(ActionFromPartsError::InvalidEpk));
+                    }
+                    Ok(Action {
+                        nf: e.nf,
+                        rk: redpallas::VerificationKey::from_decoded_affine(rk),
+                        cmx: e.cmx,
+                        encrypted_note: e.encrypted_note,
+                        cv_net: ValueCommitment::from_point(cv_net.into()),
+                        authorization: (),
+                    })
+                })
+                .collect()
+        }
+        #[cfg(not(feature = "backend-halo2"))]
+        {
+            encodings
+                .into_iter()
+                .map(|e| {
+                    let cv_net = Option::from(ValueCommitment::from_bytes(&e.cv_net))
+                        .ok_or(ActionDecodeError::InvalidCvNet)?;
+                    let rk = redpallas::VerificationKey::try_from(e.rk)
+                        .map_err(|_| ActionDecodeError::InvalidRk)?;
+                    Action::from_parts(e.nf, rk, e.cmx, e.encrypted_note, cv_net, ())
+                        .map_err(ActionDecodeError::Parts)
+                })
+                .collect()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::backend::pallas;
@@ -377,5 +487,73 @@ mod tests {
         encrypted_note.epk_bytes = [0xff; 32];
         let result = Action::from_parts(nf, non_identity_rk(), cmx, encrypted_note, cv_net, ());
         assert!(matches!(result, Err(ActionFromPartsError::InvalidEpk)));
+    }
+
+    /// Decodes `encoding` one point at a time, then `Action::from_parts`.
+    fn decode_one(e: &super::ActionEncoding) -> Result<Action<()>, super::ActionDecodeError> {
+        let cv_net = Option::from(ValueCommitment::from_bytes(&e.cv_net))
+            .ok_or(super::ActionDecodeError::InvalidCvNet)?;
+        let rk = redpallas::VerificationKey::<SpendAuth>::try_from(e.rk)
+            .map_err(|_| super::ActionDecodeError::InvalidRk)?;
+        Action::from_parts(e.nf, rk, e.cmx, e.encrypted_note.clone(), cv_net, ())
+            .map_err(super::ActionDecodeError::Parts)
+    }
+
+    #[test]
+    fn batch_from_encodings_matches_individual_decoding() {
+        let (nf, cmx, encrypted_note, _) = dummy_other_fields();
+        let point = |k: u64| (pallas::Point::generator() * pallas::Scalar::from(k)).to_bytes();
+        // 0xff..: not a field element; [0; 32]: the identity; x = 0 with the
+        // sign bit set: a non-canonical encoding.
+        let bad = [0xffu8; 32];
+        let identity = [0u8; 32];
+        let mut signed_zero = [0u8; 32];
+        signed_zero[31] = 0x80;
+        let mut cases = vec![];
+        for (cv, rk, epk) in [
+            (point(3), point(5), point(7)),
+            (bad, point(5), point(7)),
+            (point(3), bad, point(7)),
+            (point(3), identity, point(7)),
+            (point(3), point(5), bad),
+            (point(3), point(5), identity),
+            (identity, point(11), point(13)),
+            (signed_zero, point(5), point(7)),
+            (point(3), signed_zero, point(7)),
+            (point(3), point(5), signed_zero),
+        ] {
+            let mut note = encrypted_note.clone();
+            note.epk_bytes = epk;
+            cases.push(super::ActionEncoding {
+                cv_net: cv,
+                nf,
+                rk,
+                cmx,
+                encrypted_note: note,
+            });
+        }
+        // Every case alone, and runs of valid encodings (across several
+        // decoding chunks) with one invalid case at different positions.
+        for case in &cases {
+            let single = Action::batch_from_encodings(vec![case.clone()]);
+            let expected = decode_one(case);
+            assert_eq!(single.as_ref().err(), expected.as_ref().err());
+            if let (Ok(a), Ok(b)) = (single, expected) {
+                assert_eq!(a[0].cv_net().to_bytes(), b.cv_net().to_bytes());
+                assert_eq!(<[u8; 32]>::from(a[0].rk()), <[u8; 32]>::from(b.rk()));
+            }
+        }
+        for bad_case in 1..cases.len() {
+            for position in [0, 4, 9] {
+                let mut batch = vec![cases[0].clone(); 10];
+                batch[position] = cases[bad_case].clone();
+                let expected: Result<alloc::vec::Vec<_>, _> =
+                    batch.iter().map(decode_one).collect();
+                let actual = Action::batch_from_encodings(batch);
+                assert_eq!(actual.as_ref().err(), expected.as_ref().err());
+            }
+        }
+        let valid = Action::batch_from_encodings(vec![cases[0].clone(); 10]).unwrap();
+        assert_eq!(valid.len(), 10);
     }
 }

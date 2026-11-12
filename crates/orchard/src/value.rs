@@ -444,6 +444,12 @@ impl ValueCommitment {
         redpallas::VerificationKey::from_point(self.0)
     }
 
+    /// Wraps an already-decoded Pallas point.
+    #[cfg(feature = "backend-halo2")]
+    pub(crate) fn from_point(point: pallas::Point) -> Self {
+        ValueCommitment(point)
+    }
+
     /// Deserialize a value commitment from its byte representation
     pub fn from_bytes(bytes: &[u8; 32]) -> CtOption<ValueCommitment> {
         pallas::Point::from_bytes(bytes).map(ValueCommitment)

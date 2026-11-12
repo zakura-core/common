@@ -196,6 +196,71 @@ construction, proving, and signing are outside every timed sample.
 
 [`BatchValidator`]: ../src/bundle/batch.rs
 
+This harness sweeps worker counts by installing outer Rayon pools inside one
+process. That resizes the pool Halo2 and Orchard's own fan-out use, but not
+Sensei's private pool, which is sized once per process. For the Sensei
+backend, use the `batch_validation` target below with one process per worker
+setting.
+
+## Batch validation by backend
+
+The `batch_validation` target measures the same `BatchValidator` path for
+whichever backend is compiled in, signatures included, over a corpus of
+distinct two-Action payments it proves at startup. Build once, then run the
+executable Cargo reports, one fresh process per worker setting:
+
+```console
+cargo +1.97.1 bench --locked --no-run -p zakura-orchard \
+    --bench batch_validation --no-default-features \
+    --features backend-sensei,circuit,multicore,zip32-addresses,test-dependencies,x86_64-asm
+```
+
+Use `aarch64-asm` on Apple silicon, and `backend-halo2` in place of
+`backend-sensei` for the Halo2 comparison. The first argument selects the mode
+(`isolated` by default, `concurrent`, or `cold`); an unknown mode fails before
+any key or proof is built.
+
+```console
+RAYON_NUM_THREADS=16 BATCH_BUNDLES=1,16,64 BATCH_REPS=50 BATCH_WARMUP=5 \
+    ./batch-validation-sensei isolated
+
+RAYON_NUM_THREADS=16 BATCH_SIZE=64 BATCH_CONCURRENT=4 BATCH_SECONDS=6 \
+    ./batch-validation-sensei concurrent
+```
+
+Read the results with these qualifications:
+
+- **Worker counts.** `RAYON_NUM_THREADS` sizes both Rayon's global pool and
+  Sensei's private pool. Every result line reports the effective counts as
+  `rayon_workers` and, for the Sensei backend, `sensei_workers`; the latter
+  is one if the private pool could not be built. A worker count is an
+  experimental setting, not a topology: twelve workers on a 12P+4E host are
+  not pinned to performance cores, and sixteen on a 16-core/32-thread host
+  are not one per physical core. Record the affinity if you set one.
+- **Baselines.** Sensei revisions before the `configure_workers` change
+  ignore `RAYON_NUM_THREADS` and size their private pool from the detected
+  parallelism, so running this harness against such a revision with a
+  different environment value does not change its Sensei worker count. State
+  which revision a "before" figure comes from; an intermediate commit of the
+  same branch is a legitimate baseline only when it is named as one.
+- **`cold`.** It times the first validation after the same process has
+  proven its corpus and prepared the verifying key. Proving has already
+  initialized the shared workers, SRS, and prover state, and the mode does
+  not call Sensei's verifier scratch warm-up. It is the first validation
+  after setup, not process-startup latency. Sensei's ignored
+  `benchmark_cold_verification` and `benchmark_verification_stages` unit
+  tests measure proof-only first calls, with and without scratch warm-up, in
+  a process that has not proven anything.
+- **Memory.** `rss_kib` and `peak_rss_kib` come from `/proc/self/status` and
+  cover the whole process. The peak is a high-water mark that includes corpus
+  proving and every earlier cell, so compare memory with one concurrency
+  cell per process (a single `BATCH_CONCURRENT` value) and label the figure
+  as whole-process. These fields print `None` on macOS; use `/usr/bin/time
+  -l` there and record its units.
+- **Repetitions.** The calls within one process share one machine condition.
+  For small differences, use the comparison protocol below instead of adding
+  repetitions.
+
 ## Comparison protocol
 
 For final comparisons:
@@ -208,8 +273,11 @@ For final comparisons:
    multicore prover runs, set `IRONWOOD_K11_PROVER_THREADS` to the same value.
 5. Qualify the host with two control runs before comparing revisions.
 6. Run one balanced control/candidate/candidate/control bracket.
-7. Retain raw samples, binary and corpus hashes, source commits, feature sets,
-   and pre/post host telemetry.
+7. Retain raw samples, binary and corpus hashes, source commits (of the
+   library and, when it differs, of the harness), feature sets, the exact CPU
+   model and core topology, operating system, compiler version, the effective
+   worker counts each binary reports, any CPU affinity, and pre/post host
+   telemetry.
 
 Do not generate proofs, compile code, or load the fixture file inside a timed
 sample.

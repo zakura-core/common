@@ -10,6 +10,12 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-10
+
+### Changed
+
+- Use Udon 0.3.0 field and curve types throughout the public API.
+
 ## [0.1.0] - 2026-10-31
 
 ### Added
