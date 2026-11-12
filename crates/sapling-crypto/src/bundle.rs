@@ -183,12 +183,27 @@ impl<A: Authorization, V> Bundle<A, V> {
     }
 }
 
+/// A Sapling Spend description.
+///
+/// # Consensus rules
+///
+/// `rk` is held as its 32-byte encoding and is not validated when the description is
+/// constructed or parsed. The encoding is checked, canonical and on the curve, when it
+/// is decoded with `redjubjub::VerificationKey::try_from`. Proof and signature
+/// verification decode it and also reject a key of small order, as
+/// [Zcash Protocol Spec § 4.4: Spend Descriptions][spenddesc] requires.
+///
+/// Every other consumer of `rk`, including the transaction ID, the signature hash and
+/// serialization, wants only the bytes, while decoding the point costs a field square
+/// root.
+///
+/// [spenddesc]: https://zips.z.cash/protocol/protocol.pdf#spenddesc
 #[derive(Clone)]
 pub struct SpendDescription<A: Authorization> {
     cv: ValueCommitment,
     anchor: bls12_381::Scalar,
     nullifier: Nullifier,
-    rk: redjubjub::VerificationKey<SpendAuth>,
+    rk: redjubjub::VerificationKeyBytes<SpendAuth>,
     zkproof: A::SpendProof,
     spend_auth_sig: A::AuthSig,
 }
@@ -205,11 +220,13 @@ impl<A: Authorization> core::fmt::Debug for SpendDescription<A> {
 
 impl<A: Authorization> SpendDescription<A> {
     /// Constructs a v4 `SpendDescription` from its constituent parts.
+    ///
+    /// `rk` is either a decoded key or its unvalidated encoding.
     pub fn from_parts(
         cv: ValueCommitment,
         anchor: bls12_381::Scalar,
         nullifier: Nullifier,
-        rk: redjubjub::VerificationKey<SpendAuth>,
+        rk: impl Into<redjubjub::VerificationKeyBytes<SpendAuth>>,
         zkproof: A::SpendProof,
         spend_auth_sig: A::AuthSig,
     ) -> Self {
@@ -217,7 +234,7 @@ impl<A: Authorization> SpendDescription<A> {
             cv,
             anchor,
             nullifier,
-            rk,
+            rk: rk.into(),
             zkproof,
             spend_auth_sig,
         }
@@ -238,8 +255,11 @@ impl<A: Authorization> SpendDescription<A> {
         &self.nullifier
     }
 
-    /// Returns the randomized verification key for the note being spent.
-    pub fn rk(&self) -> &redjubjub::VerificationKey<SpendAuth> {
+    /// Returns the encoding of the randomized verification key for the note being spent.
+    ///
+    /// The encoding is not validated. Decode it with
+    /// `redjubjub::VerificationKey::try_from` before using it as a key.
+    pub fn rk(&self) -> &redjubjub::VerificationKeyBytes<SpendAuth> {
         &self.rk
     }
 
@@ -258,17 +278,23 @@ impl<A: Authorization> SpendDescription<A> {
 pub struct SpendDescriptionV5 {
     cv: ValueCommitment,
     nullifier: Nullifier,
-    rk: redjubjub::VerificationKey<SpendAuth>,
+    rk: redjubjub::VerificationKeyBytes<SpendAuth>,
 }
 
 impl SpendDescriptionV5 {
     /// Constructs a v5 `SpendDescription` from its constituent parts.
+    ///
+    /// `rk` is either a decoded key or its unvalidated encoding.
     pub fn from_parts(
         cv: ValueCommitment,
         nullifier: Nullifier,
-        rk: redjubjub::VerificationKey<SpendAuth>,
+        rk: impl Into<redjubjub::VerificationKeyBytes<SpendAuth>>,
     ) -> Self {
-        Self { cv, nullifier, rk }
+        Self {
+            cv,
+            nullifier,
+            rk: rk.into(),
+        }
     }
 
     pub fn into_spend_description<A>(
@@ -504,7 +530,7 @@ pub mod testing {
                 cv,
                 anchor,
                 nullifier,
-                rk,
+                rk: rk.into(),
                 zkproof,
                 spend_auth_sig: sk1.sign(&mut rng, &fake_sighash_bytes),
             }

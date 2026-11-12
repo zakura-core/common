@@ -140,14 +140,19 @@ fn read_nullifier<R: Read>(mut reader: R) -> io::Result<Nullifier> {
     Ok(nullifier)
 }
 
+/// Reads a spend's randomized verification key as bytes, without decoding the point.
+///
 /// Consensus rules (§4.4):
-/// - Canonical encoding is enforced here.
+/// - Canonical encoding is enforced when the key is decoded, which
+///   `sapling::BatchValidator::check_bundle` does before it verifies the spend.
 /// - "Not small order" is enforced in SaplingVerificationContext::check_spend()
-fn read_rk<R: Read>(mut reader: R) -> io::Result<redjubjub::VerificationKey<SpendAuth>> {
+///
+/// Like the value commitment, the key is only needed as a point by verification, and
+/// decoding it costs a field square root per spend.
+fn read_rk<R: Read>(mut reader: R) -> io::Result<redjubjub::VerificationKeyBytes<SpendAuth>> {
     let mut bytes = [0; 32];
     reader.read_exact(&mut bytes)?;
-    redjubjub::VerificationKey::try_from(bytes)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "verification key is invalid"))
+    Ok(redjubjub::VerificationKeyBytes::from(bytes))
 }
 
 /// Consensus rules (§4.4):

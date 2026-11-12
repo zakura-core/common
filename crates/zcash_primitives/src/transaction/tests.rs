@@ -1247,7 +1247,7 @@ fn invalid_sapling_value_commitments_parse_and_fail_verification() {
                     spend.cv(),
                     *spend.anchor(),
                     &spend.nullifier().0,
-                    *spend.rk(),
+                    redjubjub::VerificationKey::try_from(*spend.rk()).unwrap(),
                     &sighash,
                     *spend.spend_auth_sig(),
                     Proof::read(&spend.zkproof()[..]).unwrap(),
@@ -1335,5 +1335,78 @@ fn invalid_sapling_value_commitments_parse_and_fail_verification() {
         assert!(!batch_ok);
         assert!(!outputs_ok[0]);
         assert!(!sum_ok);
+    }
+}
+
+/// A Sapling `rk` that is not a valid, non-small-order point no longer fails to parse.
+/// Parsing keeps the bytes, and verification rejects them, without panicking anywhere.
+#[test]
+fn invalid_sapling_spend_keys_parse_and_fail_verification() {
+    use bellman::groth16::Proof;
+    use sapling::{BatchValidator, SaplingVerificationContext, circuit::pinned_verifying_keys};
+
+    use crate::transaction::sighash_v4::v4_signature_hash;
+
+    let (spend_vk, output_vk) = pinned_verifying_keys();
+    let spend_pvk = spend_vk.prepare();
+
+    // Reads a Canopy transaction and checks it round-trips, returning it and its sighash.
+    let read = |data: &[u8]| {
+        let tx = Transaction::read(data, BranchId::Canopy).unwrap();
+        let mut encoded = Vec::with_capacity(data.len());
+        tx.write(&mut encoded).unwrap();
+        assert_eq!(data, &encoded[..]);
+        let sighash: [u8; 32] = v4_signature_hash(tx.deref(), &SignableInput::Shielded)
+            .as_ref()
+            .try_into()
+            .unwrap();
+        (tx, sighash)
+    };
+    let batch_verifies = |tx: &Transaction, sighash: [u8; 32]| {
+        let mut batch = BatchValidator::new();
+        batch.check_bundle(tx.sapling_bundle().unwrap().clone(), sighash)
+            && batch.validate(spend_vk, output_vk, rand::rng())
+    };
+
+    let data = &hex::decode(self::data::sapling_spend_output::TX_HEX.concat()).unwrap()[..];
+    let (tx, sighash) = read(data);
+    let spend_rk: [u8; 32] = (*tx.sapling_bundle().unwrap().shielded_spends()[0].rk()).into();
+
+    // The unmodified transaction verifies, so a failure below is the `rk`'s.
+    assert!(batch_verifies(&tx, sighash));
+
+    // The identity, which is of small order; bytes that decode to no curve point; and
+    // the non-canonical encoding `v = q` of `v = 0`.
+    let mut identity = [0u8; 32];
+    identity[0] = 1;
+    let mut off_curve = [0u8; 32];
+    off_curve[0] = 2;
+    assert!(bool::from(
+        jubjub::AffinePoint::from_bytes(off_curve).is_none()
+    ));
+    let mut non_canonical = (-jubjub::Fq::one()).to_bytes();
+    non_canonical[0] += 1;
+
+    for (bad, decodes) in [(identity, true), (off_curve, false), (non_canonical, false)] {
+        let (tx, sighash) = read(&replace_once(data, &spend_rk, &bad));
+        let spend = &tx.sapling_bundle().unwrap().shielded_spends()[0];
+        assert_eq!(<[u8; 32]>::from(*spend.rk()), bad);
+        assert!(!batch_verifies(&tx, sighash));
+
+        let rk = redjubjub::VerificationKey::try_from(*spend.rk());
+        assert_eq!(rk.is_ok(), decodes);
+        // A key that decodes is still rejected for its small order.
+        if let Ok(rk) = rk {
+            assert!(!SaplingVerificationContext::new().check_spend(
+                spend.cv(),
+                *spend.anchor(),
+                &spend.nullifier().0,
+                rk,
+                &sighash,
+                *spend.spend_auth_sig(),
+                Proof::read(&spend.zkproof()[..]).unwrap(),
+                &spend_pvk,
+            ));
+        }
     }
 }
