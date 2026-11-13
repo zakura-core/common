@@ -133,7 +133,7 @@ poseidon = { package = "zakura-halo2-poseidon", version = "5.4.0", path = "crate
 reddsa = { package = "zakura-reddsa", version = "5.4.0", path = "crates/reddsa", default-features = false }
 redjubjub = { package = "zakura-redjubjub", version = "5.4.0", path = "crates/redjubjub", default-features = false }
 sapling = { package = "zakura-sapling-crypto", version = "5.4.0", path = "crates/sapling-crypto", default-features = false }
-sensei = { package = "zakura-sensei", version = "0.1.2", path = "crates/sensei", default-features = false }
+sensei = { package = "zakura-sensei", version = "0.1.3", path = "crates/sensei", default-features = false }
 sensei-artifacts = { package = "zakura-sensei-artifacts", version = "0.2.0", path = "crates/sensei-artifacts", default-features = false }
 sensei-macros = { package = "zakura-sensei-macros", version = "0.1.1", path = "crates/sensei-macros", default-features = false }
 sensei-shared = { package = "zakura-sensei-shared", version = "0.2.0", path = "crates/sensei-shared", default-features = false }
@@ -145,7 +145,7 @@ zcash_keys = { package = "zakura-keys", version = "5.4.0", path = "crates/zcash_
 zcash_primitives = { package = "zakura-primitives", version = "5.4.0", path = "crates/zcash_primitives", default-features = false }
 zcash_protocol = { package = "zakura-protocol", version = "5.4.0", path = "crates/zcash_protocol", default-features = false }
 zcash_proofs = { package = "zakura-proofs", version = "5.4.0", path = "crates/zcash_proofs", default-features = false }
-zcash_script = { package = "zakura-zcash-script", version = "0.0.1", path = "crates/zcash_script", default-features = false }
+zcash_script = { package = "zakura-zcash-script", version = "0.0.2", path = "crates/zcash_script", default-features = false }
 transparent = { package = "zakura-transparent", version = "5.4.0", path = "crates/zcash_transparent", default-features = false }
 zip321 = { package = "zakura-zip321", version = "5.4.0", path = "crates/zip321", default-features = false }
 

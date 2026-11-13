@@ -10,6 +10,13 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+### Added
+
+- Added the `batch_validation` benchmark target, which measures isolated and
+  concurrent `BatchValidator` latency, and the first validation after setup,
+  over a corpus of two-Action payments for whichever proof backend is
+  compiled in ([#735](https://github.com/zakura-core/common/pull/735)).
+
 ## [5.4.0] - 2026-11-10
 
 ### Added

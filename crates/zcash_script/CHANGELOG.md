@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-11-13
+
+### Changed
+
+- Replaced the `hex` dependency with `const-hex`; script ASM and descriptor
+  key rendering now hex-encode without per-byte string formatting
+  ([#742](https://github.com/zakura-core/common/pull/742)).
+
 ## [0.0.1] - 2026-10-31
 
 ### Added
