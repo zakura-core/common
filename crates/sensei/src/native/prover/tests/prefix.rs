@@ -104,16 +104,16 @@ fn structured_advice_commitments_match_dense_on_fixtures() {
                     532
                 );
             }
-            for column_index in 0..ADVICE_COLUMNS {
+            for (column_index, source) in matrix.columns.iter().enumerate().take(ADVICE_COLUMNS) {
                 // Every writer constant holds on the real witness.
                 assert_eq!(
                     target
                         .parameters()
-                        .constant_mismatches(column_index, &matrix.columns[column_index]),
+                        .constant_mismatches(column_index, source),
                     0,
                     "column {column_index}"
                 );
-                let mut column = matrix.columns[column_index].clone();
+                let mut column = source.clone();
                 assert_eq!(column.len(), N);
                 for (offset, cell) in column[USABLE_ROWS_END..].iter_mut().enumerate() {
                     *cell = value(action * 10_007 + column_index * 977 + offset * 31 + 1);
