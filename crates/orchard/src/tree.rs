@@ -1104,14 +1104,13 @@ mod tests {
             // Check paths for all leaves up to this point. The test vectors include paths
             // for not-yet-appended leaves (using uncommitted_orchard() as the leaf value),
             // but BridgeTree doesn't encode these.
-            for j in 0..=i {
+            for (j, path) in tv.paths.iter().enumerate().take(i + 1) {
                 let position = j.try_into().unwrap();
                 assert_eq!(
                     tree.witness_at_checkpoint_id(position, &checkpoint_id)
                         .unwrap(),
                     MerklePath::from_parts(
-                        tv.paths[j]
-                            .iter()
+                        path.iter()
                             .map(|v| MerkleHashOrchard::from_bytes(v).unwrap())
                             .collect(),
                         position
