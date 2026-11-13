@@ -29,7 +29,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 bip32 = { version = "0.6", default-features = false, features = ["alloc", "secp256k1-ffi"], optional = true }
 bitflags = "2.8"
 bounded-vec = "0.9"
-hex = { version = "0.4.3", default-features = false, optional = true }
+const-hex = { version = "1.19.3", default-features = false, features = ["alloc"] }
 lazy_static = { version = "1.5", optional = true }
 ripemd = { version = "0.1", default-features = false }
 secp256k1 = { version = "0.33", default-features = false, features = ["alloc"], optional = true }
@@ -38,15 +38,14 @@ sha2 = { version = "0.10", default-features = false }
 thiserror = { version = "2", default-features = false }
 
 [dev-dependencies]
-hex = { version = "0.4.3", default-features = false, features = ["std"] }
 lazy_static = "1.5"
 
 [features]
 default = ["std", "signature-validation"]
-descriptor = ["dep:bip32", "dep:hex", "dep:secp256k1"]
+descriptor = ["dep:bip32", "dep:secp256k1"]
 ## Whether to allow signature validation (and lock time verification). If disabled, the
 ## `CallbackTransactionSignatureChecker` will be unavailable, and only the `NullSignatureChecker`
 ## can be used.
 signature-validation = ["dep:secp256k1"]
 std = []
-test-dependencies = ["dep:hex", "dep:lazy_static", "hex/std"]
+test-dependencies = ["dep:lazy_static"]

@@ -324,7 +324,8 @@ mod tests {
         assert_eq!(tv_pubkey_2.to_string(), TV_PUBKEY_2);
 
         let tv_redeem_script =
-            script::Redeem::parse(&script::Code(hex::decode(TV_REDEEM_SCRIPT).unwrap())).unwrap();
+            script::Redeem::parse(&script::Code(const_hex::decode(TV_REDEEM_SCRIPT).unwrap()))
+                .unwrap();
 
         assert_eq!(
             multi(1, &[tv_pubkey_1.clone(), tv_pubkey_2.clone()]).as_ref(),
@@ -362,7 +363,8 @@ mod tests {
         .unwrap();
 
         let tv_script_pubkey =
-            script::PubKey::parse(&script::Code(hex::decode(TV_SCRIPT_PUBKEY).unwrap())).unwrap();
+            script::PubKey::parse(&script::Code(const_hex::decode(TV_SCRIPT_PUBKEY).unwrap()))
+                .unwrap();
 
         assert_eq!(
             multi(2, &[tv_xprv_1, tv_xprv_2]).and_then(|redeem| sh(&redeem)),

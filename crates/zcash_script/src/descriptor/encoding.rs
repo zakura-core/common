@@ -44,14 +44,15 @@ impl FromStr for KeyOrigin {
             .and_then(|s| {
                 let mut parts = s.split('/');
 
-                let fingerprint = hex::decode(
-                    parts
-                        .next()
-                        .expect("split() returns the full input on no matches"),
-                )
-                .ok()
-                .and_then(|fingerprint| <[u8; 4]>::try_from(fingerprint).ok())
-                .ok_or(ParseError::InvalidFingerprint)?;
+                let fingerprint = parts
+                    .next()
+                    .expect("split() returns the full input on no matches");
+                // `const_hex` accepts an optional `0x` prefix; requiring exactly 8
+                // characters rejects it, matching the previous strict parsing.
+                let fingerprint = (fingerprint.len() == 8)
+                    .then(|| const_hex::decode_to_array::<_, 4>(fingerprint).ok())
+                    .flatten()
+                    .ok_or(ParseError::InvalidFingerprint)?;
 
                 let derivation = parts
                     .map(|part| {
@@ -75,7 +76,8 @@ impl FromStr for KeyOrigin {
 
 impl fmt::Display for KeyOrigin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[{}", hex::encode(self.fingerprint))?;
+        f.write_str("[")?;
+        f.write_str(const_hex::const_encode::<4, false>(&self.fingerprint).as_str())?;
         for i in &self.derivation {
             write!(
                 f,
@@ -150,15 +152,14 @@ impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Key::Public { key, compressed } => {
-                write!(
-                    f,
-                    "{}",
-                    if *compressed {
-                        hex::encode(key.serialize())
-                    } else {
-                        hex::encode(key.serialize_uncompressed())
-                    }
-                )
+                if *compressed {
+                    f.write_str(const_hex::const_encode::<33, false>(&key.serialize()).as_str())
+                } else {
+                    f.write_str(
+                        const_hex::const_encode::<65, false>(&key.serialize_uncompressed())
+                            .as_str(),
+                    )
+                }
             }
             Key::Xpub { prefix, key, child } => {
                 write!(f, "{}", key.to_string(*prefix))?;
