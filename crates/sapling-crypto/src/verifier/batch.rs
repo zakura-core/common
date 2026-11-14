@@ -106,13 +106,19 @@ impl BatchValidator {
                 None => return false,
             };
 
+            // The spend holds `rk` as bytes; decoding it is where its canonical encoding
+            // is enforced. The decoded key is reused for the signature and the proof.
+            let Ok(rk) = redjubjub::VerificationKey::try_from(*spend.rk()) else {
+                return false;
+            };
+
             // Check the Spend consensus rules, and batch its proof and spend
             // authorization signature.
             let consensus_rules_passed = ctx.check_spend(
                 spend.cv(),
                 *spend.anchor(),
                 &spend.nullifier().0,
-                spend.rk(),
+                &rk,
                 zkproof,
                 self,
                 |this, rk| {

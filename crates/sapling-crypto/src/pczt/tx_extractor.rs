@@ -171,11 +171,10 @@ impl<V> crate::Bundle<Unbound, V> {
         sighash: [u8; 32],
         rng: R,
     ) -> Option<crate::Bundle<Authorized, V>> {
-        if self
-            .shielded_spends()
-            .iter()
-            .all(|spend| spend.rk().verify(&sighash, spend.spend_auth_sig()).is_ok())
-        {
+        if self.shielded_spends().iter().all(|spend| {
+            redjubjub::VerificationKey::try_from(*spend.rk())
+                .is_ok_and(|rk| rk.verify(&sighash, spend.spend_auth_sig()).is_ok())
+        }) {
             Some(self.map_authorization(
                 &mut (),
                 |_, p| p,
