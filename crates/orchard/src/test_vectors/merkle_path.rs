@@ -1,5 +1,6 @@
 use alloc::vec::Vec;
 
+#[derive(Clone)]
 pub(crate) struct TestVector {
     pub(crate) leaves: [[u8; 32]; 16],
     pub(crate) paths: [[[u8; 32]; 4]; 16],
@@ -8,7 +9,8 @@ pub(crate) struct TestVector {
 
 pub(crate) fn test_vectors() -> Vec<TestVector> {
     // From https://github.com/zcash-hackworks/zcash-test-vectors/blob/master/orchard_merkle_tree.py
-    vec![
+    // Keep the fixtures in data instead of emitting an initializer per vector.
+    static TEST_VECTORS: &[TestVector] = &[
         TestVector {
             leaves: [
                 [
@@ -7097,5 +7099,6 @@ pub(crate) fn test_vectors() -> Vec<TestVector> {
                 0x7e, 0xaa, 0x2b, 0x25,
             ],
         },
-    ]
+    ];
+    TEST_VECTORS.to_vec()
 }

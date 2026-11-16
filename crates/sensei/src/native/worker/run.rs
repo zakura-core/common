@@ -218,6 +218,30 @@ impl<C: Coordinator> State<'_, C> {
 }
 
 #[cfg(feature = "multicore")]
+type ScopedWork<'scope> = Box<dyn FnOnce(&rayon::ScopeFifo<'scope>) + Send + 'scope>;
+
+// Keep Rayon's job allocation and cleanup shared by coordinator types. The
+// callback still owns its concrete task and drains successors on its stack.
+#[cfg(feature = "multicore")]
+#[inline(never)]
+fn spawn<'scope>(scope: &rayon::ScopeFifo<'scope>, work: ScopedWork<'scope>) {
+    scope.spawn_fifo(work);
+}
+
+#[cfg(feature = "multicore")]
+#[inline(never)]
+fn run_in_scope<'scope>(work: ScopedWork<'scope>) {
+    rayon::scope_fifo(work);
+}
+
+// The executor's join machinery depends on the executor, not the coordinator.
+#[cfg(feature = "multicore")]
+#[inline(never)]
+fn run_on_executor<E: Executor>(executor: &E, work: Box<dyn FnOnce() + Send + '_>) {
+    executor.join(work, || ());
+}
+
+#[cfg(feature = "multicore")]
 fn dispatch<'scope, C: Coordinator + 'scope>(
     scope: &rayon::ScopeFifo<'scope>,
     shared: &'scope Mutex<State<'_, C>>,
@@ -226,31 +250,35 @@ fn dispatch<'scope, C: Coordinator + 'scope>(
         let Some(mut task) = shared.lock().unwrap().claim() else {
             return;
         };
-        scope.spawn_fifo(move |scope| {
-            loop {
-                let panic = catch_unwind(AssertUnwindSafe(|| task.execute())).err();
-                let (next, fill) = {
-                    let mut state = shared.lock().unwrap();
-                    state.panic = state.panic.take().or(panic);
-                    let publication =
-                        catch_unwind(AssertUnwindSafe(|| state.coordinator.complete(task))).err();
-                    state.panic = state.panic.take().or(publication);
-                    state.active -= 1;
-                    let next = state.claim();
-                    let fill = state.panic.is_none() && state.active < state.limit;
-                    (next, fill)
-                };
-                // A completion may release a whole frontier. Fill vacant
-                // leases, then keep one successor on this worker's stack.
-                if fill {
-                    dispatch(scope, shared);
+        spawn(
+            scope,
+            Box::new(move |scope| {
+                loop {
+                    let panic = catch_unwind(AssertUnwindSafe(|| task.execute())).err();
+                    let (next, fill) = {
+                        let mut state = shared.lock().unwrap();
+                        state.panic = state.panic.take().or(panic);
+                        let publication =
+                            catch_unwind(AssertUnwindSafe(|| state.coordinator.complete(task)))
+                                .err();
+                        state.panic = state.panic.take().or(publication);
+                        state.active -= 1;
+                        let next = state.claim();
+                        let fill = state.panic.is_none() && state.active < state.limit;
+                        (next, fill)
+                    };
+                    // A completion may release a whole frontier. Fill vacant
+                    // leases, then keep one successor on this worker's stack.
+                    if fill {
+                        dispatch(scope, shared);
+                    }
+                    match next {
+                        Some(next) => task = next,
+                        None => return,
+                    }
                 }
-                match next {
-                    Some(next) => task = next,
-                    None => return,
-                }
-            }
-        });
+            }),
+        );
     }
 }
 
@@ -269,8 +297,9 @@ pub(crate) fn drive<C: Coordinator, E: Executor>(
         return;
     }
     #[cfg(feature = "multicore")]
-    executor.join(
-        || {
+    run_on_executor(
+        executor,
+        Box::new(|| {
             if rayon::current_thread_index().is_none() {
                 serial(coordinator);
                 return;
@@ -281,14 +310,13 @@ pub(crate) fn drive<C: Coordinator, E: Executor>(
                 limit: budget.get(),
                 panic: None,
             });
-            rayon::scope_fifo(|scope| dispatch(scope, &shared));
+            run_in_scope(Box::new(|scope| dispatch(scope, &shared)));
             let state = shared.into_inner().unwrap();
             assert_eq!(state.active, 0, "the scope drains all owned leases");
             if let Some(panic) = state.panic {
                 resume_unwind(panic);
             }
-        },
-        || (),
+        }),
     );
 }
 

@@ -2,6 +2,7 @@
 
 use alloc::vec::Vec;
 
+#[derive(Clone)]
 pub(crate) struct TestVector {
     pub(crate) sk: [u8; 32],
     pub(crate) ask: [u8; 32],
@@ -28,7 +29,8 @@ pub(crate) struct TestVector {
 
 pub(crate) fn test_vectors() -> Vec<TestVector> {
     // From https://github.com/zcash/zcash-test-vectors/blob/master/zcash_test_vectors/orchard/key_components.py
-    vec![
+    // Keep the fixtures in data instead of emitting an initializer per vector.
+    static TEST_VECTORS: &[TestVector] = &[
         TestVector {
             sk: [
                 0x5d, 0x7a, 0x8f, 0x73, 0x9a, 0x2d, 0x9e, 0x94, 0x5b, 0x0c, 0xe1, 0x52, 0xa8, 0x04,
@@ -1039,5 +1041,6 @@ pub(crate) fn test_vectors() -> Vec<TestVector> {
                 0x62, 0x61, 0xc3, 0x0c,
             ],
         },
-    ]
+    ];
+    TEST_VECTORS.to_vec()
 }

@@ -2,6 +2,7 @@
 
 use alloc::vec::Vec;
 
+#[derive(Clone)]
 pub(crate) struct TestVector {
     pub(crate) incoming_viewing_key: [u8; 64],
     pub(crate) ovk: [u8; 32],
@@ -26,7 +27,8 @@ pub(crate) struct TestVector {
 
 pub(crate) fn test_vectors() -> Vec<TestVector> {
     // From https://github.com/zcash-hackworks/zcash-test-vectors/blob/master/orchard_note_encryption.py
-    vec![
+    // Keep the fixtures in data instead of emitting an initializer per vector.
+    static TEST_VECTORS: &[TestVector] = &[
         TestVector {
             incoming_viewing_key: [
                 0x10, 0x39, 0xd8, 0xe6, 0x4a, 0x80, 0x90, 0x2e, 0x10, 0x59, 0x47, 0x81, 0x7d, 0xf3,
@@ -2117,5 +2119,6 @@ pub(crate) fn test_vectors() -> Vec<TestVector> {
                 0x59, 0x4b, 0x7c, 0x5a, 0x21, 0x9c, 0x7a, 0x00, 0xad, 0x15,
             ],
         },
-    ]
+    ];
+    TEST_VECTORS.to_vec()
 }
