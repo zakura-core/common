@@ -1040,6 +1040,30 @@ pub fn create_proof<
 where
     <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send,
 {
+    create_proof_cancellable(params, pk, circuits, instances, rng, transcript, &|| false)
+}
+
+/// Creates a proof, stopping at phase boundaries when `cancelled` returns true.
+/// The caller must discard the partial transcript on cancellation. Parallel work
+/// in the current phase is joined before this function returns.
+pub fn create_proof_cancellable<
+    C: CurveAffine,
+    E: EncodedChallenge<C>,
+    R: Rng,
+    T: TranscriptWrite<C, E>,
+    ConcreteCircuit: Circuit<C::ScalarExt> + Sync,
+>(
+    params: &Params<C>,
+    pk: &ProvingKey<C>,
+    circuits: &[ConcreteCircuit],
+    instances: &[&[&[C::Scalar]]],
+    rng: R,
+    transcript: &mut T,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<(), Error>
+where
+    <ConcreteCircuit as Circuit<C::ScalarExt>>::Config: Send,
+{
     if circuits.len() != instances.len() {
         return Err(Error::InvalidInstances);
     }
@@ -1072,7 +1096,15 @@ where
         .map(|_| ())
     };
 
-    create_proof_with_synthesis(params, pk, instances, rng, transcript, &mut synthesize)
+    create_proof_with_synthesis(
+        params,
+        pk,
+        instances,
+        rng,
+        transcript,
+        &mut synthesize,
+        cancelled,
+    )
 }
 
 /// Fills the witnesses for every circuit in a batch, in order.
@@ -1092,6 +1124,7 @@ fn create_proof_with_synthesis<
     mut rng: R,
     transcript: &mut T,
     synthesize: &mut SynthesizeWitnesses<'_, C::Scalar>,
+    cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<(), Error> {
     for instance in instances.iter() {
         if instance.len() != pk.vk.cs.num_instance_columns {
@@ -1099,6 +1132,9 @@ fn create_proof_with_synthesis<
         }
     }
 
+    if cancelled() {
+        return Err(Error::Cancelled);
+    }
     // Hash verification key into transcript
     pk.vk.hash_into(transcript)?;
 
@@ -1109,6 +1145,9 @@ fn create_proof_with_synthesis<
     let meta = &pk.vk.cs;
     let max_instance_len = params.n as usize - (meta.blinding_factors() + 1);
 
+    if cancelled() {
+        return Err(Error::Cancelled);
+    }
     let instance_values = instances
         .into_par_iter()
         .map(|instance| -> Result<_, Error> {
@@ -1367,6 +1406,9 @@ fn create_proof_with_synthesis<
         (instance, prepare_advice(witnesses, &mut rng))
     };
 
+    if cancelled() {
+        return Err(Error::Cancelled);
+    }
     let mut advice = Vec::with_capacity(prepared_advice.len());
     for (advice_commitments, advice_single) in prepared_advice {
         for commitment in advice_commitments {
@@ -1536,6 +1578,9 @@ fn create_proof_with_synthesis<
         }
     }
 
+    if cancelled() {
+        return Err(Error::Cancelled);
+    }
     let prepared_lookups = lookup::prover::prepare_permuted(
         &pk.vk.cs.lookups,
         lookup_table_plan,
@@ -1593,6 +1638,9 @@ fn create_proof_with_synthesis<
         permutation_workers,
         params.n as usize,
     );
+    if cancelled() {
+        return Err(Error::Cancelled);
+    }
     let permutations: Vec<permutation::prover::Committed<C, _>> = if instance.len() == 1
         && prepare_permutation_sets_in_parallel::<C>(
             permutation_set_count,
@@ -1689,6 +1737,9 @@ fn create_proof_with_synthesis<
         }
     }
 
+    if cancelled() {
+        return Err(Error::Cancelled);
+    }
     let prepared_lookup_products = lookup_product_tasks
         .into_par_iter()
         .map(|(lookup, blinding)| lookup.prepare_product(pk, params, beta, gamma, blinding))
@@ -1716,6 +1767,9 @@ fn create_proof_with_synthesis<
 
     // Commit to the random polynomial that masks the folded quotient
     // evaluation in the multi-opening argument.
+    if cancelled() {
+        return Err(Error::Cancelled);
+    }
     let vanishing = vanishing::Argument::commit_random_polynomial(params, &mut rng, transcript)?;
 
     // Obtain challenge for keeping all separate gates linearly independent
@@ -1817,6 +1871,9 @@ fn create_proof_with_synthesis<
     };
 
     // Construct and commit to the quotient polynomial h(X).
+    if cancelled() {
+        return Err(Error::Cancelled);
+    }
     let (vanishing, prepared_plan) = vanishing.construct_quotient(
         params,
         domain,
@@ -2013,6 +2070,9 @@ fn create_proof_with_synthesis<
         // mask must have unit coefficient in its point-set fold at x_3.
         .chain(vanishing.open(x));
 
+    if cancelled() {
+        return Err(Error::Cancelled);
+    }
     multiopen::create_proof(params, rng, transcript, instances).map_err(|_| Error::Opening)
 }
 
@@ -2508,6 +2568,40 @@ fn test_create_proof() {
     )
     .expect("cached-configuration proof generation should not fail");
     let cached_config_proof = transcript.finalize();
+
+    // Cancellation never changes the completed proof and every exposed checkpoint
+    // returns a cancellation outcome rather than publishing partial proof bytes.
+    let checkpoints = std::sync::atomic::AtomicUsize::new(0);
+    let mut cancellable = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+    create_proof_cancellable(
+        &params,
+        &pk,
+        &[MyCircuit],
+        &[&[]],
+        StdRng::seed_from_u64(SAME_SHAPE_PROOF_SEED),
+        &mut cancellable,
+        &|| {
+            checkpoints.fetch_add(1, Ordering::Relaxed);
+            false
+        },
+    )
+    .expect("uncancelled construction succeeds");
+    assert_eq!(cancellable.finalize(), cached_config_proof);
+    for cancel_at in 0..checkpoints.load(Ordering::Relaxed) {
+        let reached = std::sync::atomic::AtomicUsize::new(0);
+        let mut partial = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+        let result = create_proof_cancellable(
+            &params,
+            &pk,
+            &[MyCircuit],
+            &[&[]],
+            StdRng::seed_from_u64(SAME_SHAPE_PROOF_SEED),
+            &mut partial,
+            &|| reached.fetch_add(1, Ordering::Relaxed) == cancel_at,
+        );
+        assert!(matches!(result, Err(Error::Cancelled)));
+        assert_eq!(reached.load(Ordering::Relaxed), cancel_at + 1);
+    }
 
     // A different circuit type with the same shape and configuration type
     // keeps the established fallback of configuring itself at proving time.

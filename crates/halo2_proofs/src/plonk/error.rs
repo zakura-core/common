@@ -10,6 +10,8 @@ use super::{Any, Column};
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum Error {
+    /// The caller cancelled proof construction at a phase boundary.
+    Cancelled,
     /// This is an error that can occur during synthesis of the circuit, for
     /// example, when the witness is not present.
     Synthesis,
@@ -63,6 +65,7 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Error::Cancelled => write!(f, "proof construction cancelled"),
             Error::Synthesis => write!(f, "General synthesis error"),
             Error::InvalidInstances => write!(f, "Provided instances do not match the circuit"),
             Error::InvalidParameters => {
