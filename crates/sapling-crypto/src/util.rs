@@ -16,13 +16,6 @@ pub fn generate_random_rseed<R: Rng + CryptoRng>(
     zip212_enforcement: Zip212Enforcement,
     rng: &mut R,
 ) -> Rseed {
-    generate_random_rseed_internal(zip212_enforcement, rng)
-}
-
-pub(crate) fn generate_random_rseed_internal<R: Rng>(
-    zip212_enforcement: Zip212Enforcement,
-    rng: &mut R,
-) -> Rseed {
     match zip212_enforcement {
         Zip212Enforcement::Off => Rseed::BeforeZip212(jubjub::Fr::random(rng)),
         Zip212Enforcement::GracePeriod | Zip212Enforcement::On => {

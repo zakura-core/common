@@ -178,7 +178,7 @@ pub(crate) mod testing {
     #[allow(unused_imports)]
     use crate::backend::prelude::*;
     use crate::primitives::redpallas::SpendAuth;
-    use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rand::{CryptoRng, Rng, SeedableRng, rngs::StdRng};
     use zcash_note_encryption::Domain as _;
 
     use proptest::prelude::*;
@@ -206,7 +206,7 @@ pub(crate) mod testing {
         note: Note,
         cv_net: &ValueCommitment,
         cmx: &ExtractedNoteCommitment,
-        mut rng: impl Rng,
+        mut rng: impl Rng + CryptoRng,
     ) -> TransmittedNoteCiphertext {
         let encryptor = OrchardNoteEncryption::new(None, note, [0u8; 512]);
         TransmittedNoteCiphertext {
