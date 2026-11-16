@@ -79,7 +79,7 @@ default = ["backend-halo2", "wallet", "zip32-addresses", "circuit", "multicore",
 dev-graph = ["orchard-legacy?/dev-graph", "image", "plotters"]
 # Retained for compatibility with the former unused optional dependency.
 image = []
-multicore = ["sensei?/multicore", "orchard-legacy?/multicore", "dep:maybe-rayon", "maybe-rayon/threads"]
+multicore = ["sensei?/multicore", "orchard-legacy?/multicore", "dep:maybe-rayon", "maybe-rayon/threads", "rand/std_rng"]
 orbits = ["orchard-legacy?/orbits"]
 # Disable automatic x86-64 assembly selection in the proving dependencies.
 portable = ["sensei?/portable", "orchard-legacy?/portable"]
