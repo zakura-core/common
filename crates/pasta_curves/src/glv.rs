@@ -1940,6 +1940,109 @@ fn batch_invert_and_add<F: Field>(
     Some(())
 }
 
+/// Fewest bases per worker for which [`multiexp_parallel`] splits the
+/// windows left after its last full wave into per-worker term slices.
+/// Tests use a small threshold so the parallel MSM tests split windows too.
+#[cfg(feature = "multicore")]
+const MIN_REMAINDER_SLICE_BASES: usize = if cfg!(test) { 16 } else { 2048 };
+
+/// [`multiexp_parallel`] recodes digit rows up front only when there are at
+/// least this many windows per worker (as a fraction `num / den`).
+#[cfg(feature = "multicore")]
+const MIN_WINDOWS_PER_WORKER_FOR_ROWS: (usize, usize) = (3, 2);
+
+/// The widest window whose signed digits [`booth_digit_rows`] stores.
+const MAX_DIGIT_ROW_BITS: usize = 15;
+
+/// Every window's signed Booth digit of every component, window-major:
+/// `rows[window * 2n + 2 * base + half]`, as [`booth_digit`] computes it
+/// (0 for an identity base). One pass per component recodes all of its
+/// windows incrementally, instead of re-extracting each window's bits from
+/// the 128-bit magnitude.
+fn booth_digit_rows<F: Sync>(
+    components: &[(SignedMagnitude, SignedMagnitude)],
+    bases: &[MultiexpBase<F>],
+    window_bits: usize,
+    window_count: usize,
+) -> Vec<i16> {
+    debug_assert!(window_bits <= MAX_DIGIT_ROW_BITS);
+    let width = components.len() * 2;
+    let mut rows = alloc::vec![0i16; width * window_count];
+    let fill = |rows: &mut [&mut [i16]], start: usize| {
+        let len = rows.first().map_or(0, |row| row.len());
+        let radix = 1u128 << window_bits;
+        for column in 0..len {
+            let index = start + column;
+            let (base, half) = (index / 2, index % 2);
+            if bases[base].identity {
+                continue;
+            }
+            let component = if half == 0 {
+                components[base].0
+            } else {
+                components[base].1
+            };
+            let mut previous_top = 0i32;
+            let mut magnitude = component.magnitude;
+            for row in rows.iter_mut() {
+                let value = (magnitude & (radix - 1)) as i32;
+                magnitude >>= window_bits;
+                let top = value >> (window_bits - 1);
+                let digit = value + previous_top - (top << window_bits);
+                previous_top = top;
+                row[column] = if component.negative { -digit } else { digit } as i16;
+            }
+        }
+    };
+    #[cfg(feature = "multicore")]
+    {
+        let threads = maybe_rayon::current_num_threads();
+        let chunk = width.div_ceil(threads).max(1024);
+        let mut per_chunk: Vec<Vec<&mut [i16]>> = Vec::new();
+        for row in rows.chunks_mut(width) {
+            for (c, part) in row.chunks_mut(chunk).enumerate() {
+                if per_chunk.len() <= c {
+                    per_chunk.push(Vec::new());
+                }
+                per_chunk[c].push(part);
+            }
+        }
+        use maybe_rayon::prelude::*;
+        per_chunk
+            .into_par_iter()
+            .enumerate()
+            .for_each(|(c, mut rows)| fill(&mut rows, c * chunk));
+    }
+    #[cfg(not(feature = "multicore"))]
+    {
+        let mut all: Vec<&mut [i16]> = rows.chunks_mut(width).collect();
+        fill(&mut all, 0);
+    }
+    rows
+}
+
+/// [`window_assignments`] from a row of [`booth_digit_rows`].
+fn row_assignments(
+    row: &[i16],
+    bucket_count: usize,
+    assignments: &mut Vec<WindowAssignment>,
+    counts: &mut Vec<usize>,
+) {
+    assignments.clear();
+    assignments.reserve(row.len());
+    counts.clear();
+    counts.resize(bucket_count, 0);
+    for (component, &digit) in row.iter().enumerate() {
+        if digit != 0 {
+            counts[digit.unsigned_abs() as usize - 1] += 1;
+            assignments.push(WindowAssignment {
+                component,
+                signed_bucket: digit as isize,
+            });
+        }
+    }
+}
+
 /// Collects the nonzero signed points assigned to one Booth window.
 fn window_assignments<C>(
     components: &[(SignedMagnitude, SignedMagnitude)],
@@ -2331,6 +2434,156 @@ fn reduce_affine_buckets29_reusing<C: GlvParams>(
     }
 }
 
+/// Buckets per running-sum chain in [`sum_buckets_batch`].
+const BUCKET_CHAIN_LEN: usize = 16;
+
+/// [`sum_buckets`] of every window, with the running sums in affine
+/// coordinates.
+///
+/// Each window's buckets are split into chains of [`BUCKET_CHAIN_LEN`];
+/// every chain of every window advances in lockstep, so each step's
+/// additions (`running += bucket`, then `sum += running`) share one
+/// inversion. A chain covering buckets `lo..lo + L` yields
+/// `sum_c = sum (b - lo + 1) B_b` and its total `T_c`; the window sum is
+/// `sum_c sum_c + L * sum_c c T_c`, the last by a short projective running
+/// sum over the chains. An affine addition costs about half a projective
+/// one. Equal points double and opposite points cancel. Returns `None` only
+/// if the shared inversion fails; the caller then uses [`sum_buckets`].
+fn sum_buckets_batch<C: GlvParams>(
+    windows: &[Vec<Option<AffinePoint<C::Base>>>],
+) -> Option<Vec<C>> {
+    let mut chains: Vec<(usize, usize, usize)> = Vec::new(); // (window, lo, hi)
+    for (w, buckets) in windows.iter().enumerate() {
+        let mut lo = 0;
+        while lo < buckets.len() {
+            let hi = (lo + BUCKET_CHAIN_LEN).min(buckets.len());
+            chains.push((w, lo, hi));
+            lo = hi;
+        }
+    }
+    let k = chains.len();
+    let mut running: Vec<Option<AffinePoint<C::Base>>> = alloc::vec![None; k];
+    let mut sum: Vec<Option<AffinePoint<C::Base>>> = alloc::vec![None; k];
+    let mut lefts: Vec<usize> = Vec::with_capacity(k);
+    let mut dens: Vec<(C::Base, C::Base, C::Base)> = Vec::with_capacity(k);
+    let mut rights: Vec<AffinePoint<C::Base>> = Vec::with_capacity(k);
+
+    // Adds `rights[i]` into `targets[lefts[i]]` for all i with one inversion,
+    // with complete handling: equal points double, opposite points cancel.
+    fn add_level<F: Field>(
+        targets: &mut [Option<AffinePoint<F>>],
+        lefts: &[usize],
+        rights: &[AffinePoint<F>],
+        dens: &mut Vec<(F, F, F)>,
+    ) -> Option<()> {
+        dens.clear();
+        let mut acc = F::ONE;
+        for (&l, r) in lefts.iter().zip(rights) {
+            let left = targets[l].as_ref().unwrap();
+            let dx = r.x - left.x;
+            let (num, den) = if !dx.is_zero_vartime() {
+                (r.y - left.y, dx)
+            } else if (r.y - left.y).is_zero_vartime() && !left.y.is_zero_vartime() {
+                let xx = left.x.square();
+                (xx.double() + xx, left.y.double())
+            } else {
+                // Opposite points (or a point of order two): the identity.
+                (F::ZERO, F::ZERO)
+            };
+            dens.push((acc, num, den));
+            if !den.is_zero_vartime() {
+                acc *= den;
+            }
+        }
+        let mut inv = Option::<F>::from(acc.invert())?;
+        for i in (0..lefts.len()).rev() {
+            let (prefix, num, den) = dens[i];
+            if den.is_zero_vartime() {
+                targets[lefts[i]] = None;
+                continue;
+            }
+            let left = targets[lefts[i]].unwrap();
+            let r = rights[i];
+            let d_inv = inv * prefix;
+            inv *= den;
+            let slope = num * d_inv;
+            let x = slope.square() - left.x - r.x;
+            let y = slope * (left.x - x) - left.y;
+            targets[lefts[i]] = Some(AffinePoint { x, y });
+        }
+        Some(())
+    }
+
+    for step in 0..BUCKET_CHAIN_LEN {
+        // running += bucket
+        lefts.clear();
+        rights.clear();
+        for (c, &(w, lo, hi)) in chains.iter().enumerate() {
+            let len = hi - lo;
+            if step >= len {
+                continue;
+            }
+            if let Some(b) = windows[w][hi - 1 - step] {
+                match running[c] {
+                    None => running[c] = Some(b),
+                    Some(_) => {
+                        lefts.push(c);
+                        rights.push(b);
+                    }
+                }
+            }
+        }
+        add_level(&mut running, &lefts, &rights, &mut dens)?;
+        // sum += running
+        lefts.clear();
+        rights.clear();
+        for (c, &(_, lo, hi)) in chains.iter().enumerate() {
+            if step >= hi - lo {
+                continue;
+            }
+            if let Some(r) = running[c] {
+                match sum[c] {
+                    None => sum[c] = Some(r),
+                    Some(_) => {
+                        lefts.push(c);
+                        rights.push(r);
+                    }
+                }
+            }
+        }
+        add_level(&mut sum, &lefts, &rights, &mut dens)?;
+    }
+
+    let to_point = |p: &Option<AffinePoint<C::Base>>| match p {
+        Some(p) => C::from(C::affine_unchecked(p.x, p.y, private::CrateToken(()))),
+        None => C::identity(),
+    };
+    let mut out = alloc::vec![C::identity(); windows.len()];
+    let mut c = 0;
+    for (w, out) in out.iter_mut().enumerate() {
+        let start = c;
+        while c < k && chains[c].0 == w {
+            c += 1;
+        }
+        let mut total = C::identity();
+        for chain_sum in &sum[start..c] {
+            total += to_point(chain_sum);
+        }
+        // sum over chains of lo_c * T_c = L * sum_j j T_(start + j).
+        let mut acc = C::identity();
+        let mut run = C::identity();
+        for chain in (start + 1..c).rev() {
+            run += to_point(&running[chain]);
+            acc += run;
+        }
+        for _ in 0..BUCKET_CHAIN_LEN.trailing_zeros() {
+            acc = acc.double();
+        }
+        *out = total + acc;
+    }
+    Some(out)
+}
+
 fn sum_buckets<C: GlvParams>(buckets: &[Option<AffinePoint<C::Base>>]) -> C {
     let mut running = C::identity();
     let mut sum = C::identity();
@@ -2424,11 +2677,14 @@ fn with_window_scratch<F: Field, R>(f: impl FnOnce(&mut WindowScratch<F>) -> R) 
     }
 }
 
-fn fill_window<C: GlvParams>(
+/// Fills and reduces one window's buckets, reading the window's digits from
+/// `row` (a row of [`booth_digit_rows`]) when given.
+fn fill_window_from<C: GlvParams>(
     components: &[(SignedMagnitude, SignedMagnitude)],
     bases: &[MultiexpBase<C::Base>],
     window_bits: usize,
     window: usize,
+    row: Option<&[i16]>,
     scratch: &mut WindowScratch<C::Base>,
 ) -> Option<Vec<Option<AffinePoint<C::Base>>>> {
     let bucket_count = 1 << (window_bits - 1);
@@ -2440,7 +2696,12 @@ fn fill_window<C: GlvParams>(
         points,
         reduce,
     } = scratch;
-    window_assignments::<C>(components, bases, window_bits, window, assignments, counts);
+    match row {
+        Some(row) => row_assignments(row, bucket_count, assignments, counts),
+        None => {
+            window_assignments::<C>(components, bases, window_bits, window, assignments, counts)
+        }
+    }
 
     offsets.clear();
     offsets.reserve(bucket_count + 1);
@@ -2489,17 +2750,34 @@ fn multiexp_serial<C: GlvParams>(
     window_bits: usize,
 ) -> Option<C> {
     let window_count = GLV_COMPONENT_BITS / window_bits + 1;
+    let rows = (window_bits <= MAX_DIGIT_ROW_BITS)
+        .then(|| booth_digit_rows(components, bases, window_bits, window_count));
+    let width = components.len() * 2;
     with_window_scratch(|scratch| {
+        let mut all = Vec::with_capacity(window_count);
+        for window in 0..window_count {
+            let row = rows
+                .as_deref()
+                .map(|rows| &rows[window * width..(window + 1) * width]);
+            all.push(fill_window_from::<C>(
+                components,
+                bases,
+                window_bits,
+                window,
+                row,
+                scratch,
+            )?);
+        }
+        let sums = sum_buckets_batch::<C>(&all)
+            .unwrap_or_else(|| all.iter().map(|b| sum_buckets::<C>(b)).collect());
         let mut acc = C::identity();
-        for window in (0..window_count).rev() {
+        for (window, sum) in sums.into_iter().enumerate().rev() {
             if window + 1 != window_count {
                 for _ in 0..window_bits {
                     acc = acc.double();
                 }
             }
-
-            let buckets = fill_window::<C>(components, bases, window_bits, window, scratch)?;
-            acc += sum_buckets::<C>(&buckets);
+            acc += sum;
         }
         Some(acc)
     })
@@ -2670,25 +2948,74 @@ fn multiexp_parallel<C: GlvParams>(
     // claim windows one at a time instead of taking a fixed stride: with
     // cores of unequal speed (Apple's performance and efficiency cores), a
     // fixed stride gives slow cores as many windows as fast ones.
-    let tasks = maybe_rayon::current_num_threads().clamp(1, window_count);
-    let next_window = core::sync::atomic::AtomicUsize::new(0);
+    let workers = maybe_rayon::current_num_threads().max(1);
+    // Recoding every window's digits up front is a separate parallel pass.
+    // With under 1.5 windows per worker, each window's own recoding is
+    // cheaper than that extra pass (Ice Lake, 16 workers: rows cost 2-13% of
+    // the MSM, including the 16-17 narrow windows of 1-4 bundle batches);
+    // Zen 4 at 4-8 workers and Ice Lake at 4 gain 1-5% from the rows.
+    let rows = (window_bits <= MAX_DIGIT_ROW_BITS
+        && window_count * MIN_WINDOWS_PER_WORKER_FOR_ROWS.1
+            >= workers * MIN_WINDOWS_PER_WORKER_FOR_ROWS.0)
+        .then(|| booth_digit_rows(components, bases, window_bits, window_count));
+    let width = components.len() * 2;
+    // Whole windows go first. When the windows left over after the last
+    // full wave (`window_count % workers`) have enough terms, each is split
+    // into one slice of its terms per worker, so the last wave ends together
+    // instead of leaving workers idle; a window's bucket sum is linear in its
+    // terms, so the slices' sums add. Small slices cost more in bucket sums
+    // than the idle workers they save.
+    let n = components.len();
+    let remainder = if window_count > workers && n / workers >= MIN_REMAINDER_SLICE_BASES {
+        window_count % workers
+    } else {
+        0
+    };
+    let whole = window_count - remainder;
+    let slices = if remainder == 0 { 1 } else { workers };
+    let task_count = whole + remainder * slices;
+    let task = move |index: usize| -> (usize, core::ops::Range<usize>) {
+        if index < whole {
+            (index, 0..n)
+        } else {
+            let index = index - whole;
+            let (window, slice) = (whole + index / slices, index % slices);
+            (window, slice * n / slices..(slice + 1) * n / slices)
+        }
+    };
+    let tasks = workers.clamp(1, task_count);
+    let next_task = core::sync::atomic::AtomicUsize::new(0);
     let sums = par_map_indices(tasks, &|_| {
         with_window_scratch(|scratch| {
-            core::iter::from_fn(|| {
-                let window = next_window.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                (window < window_count).then_some(window)
-            })
-            .map(|window| {
-                let buckets = fill_window::<C>(components, bases, window_bits, window, scratch)?;
-                Some((window, sum_buckets::<C>(&buckets)))
-            })
-            .collect::<Option<Vec<_>>>()
+            let mut indices = Vec::new();
+            let mut all = Vec::new();
+            for index in core::iter::from_fn(|| {
+                let index = next_task.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                (index < task_count).then_some(index)
+            }) {
+                let (window, terms) = task(index);
+                indices.push(window);
+                let row = rows.as_deref().map(|rows| {
+                    &rows[window * width + 2 * terms.start..window * width + 2 * terms.end]
+                });
+                all.push(fill_window_from::<C>(
+                    &components[terms.clone()],
+                    &bases[terms],
+                    window_bits,
+                    window,
+                    row,
+                    scratch,
+                )?);
+            }
+            let sums = sum_buckets_batch::<C>(&all)
+                .unwrap_or_else(|| all.iter().map(|b| sum_buckets::<C>(b)).collect());
+            Some(indices.into_iter().zip(sums).collect::<Vec<_>>())
         })
     });
     let mut window_sums = alloc::vec![C::identity(); window_count];
     for task in sums {
         for (window, sum) in task? {
-            window_sums[window] = sum;
+            window_sums[window] += sum;
         }
     }
     let mut acc = C::identity();
@@ -8631,5 +8958,157 @@ mod tests {
 
         run::<vesta::Point>("vesta");
         run::<pallas::Point>("pallas");
+    }
+}
+
+#[cfg(test)]
+mod bucket_sum_batch_tests {
+    use super::*;
+    use crate::{Ep, EpAffine};
+    use group::{Curve, Group};
+    use rand::SeedableRng;
+
+    fn affine(p: Ep) -> AffinePoint<crate::Fp> {
+        let a: EpAffine = p.to_affine();
+        let (x, y) = <Ep as private::Sealed>::affine_xy(&a);
+        AffinePoint { x, y }
+    }
+
+    #[test]
+    fn batched_bucket_sums_match_running_sums() {
+        let mut rng = rand_xorshift::XorShiftRng::from_seed([11u8; 16]);
+        for (windows, len) in [(1usize, 1usize), (3, 7), (4, 16), (2, 33), (5, 128)] {
+            let all: Vec<Vec<Option<AffinePoint<crate::Fp>>>> = (0..windows)
+                .map(|w| {
+                    (0..len)
+                        .map(|b| ((b + w) % 3 != 1).then(|| affine(Ep::random(&mut rng))))
+                        .collect()
+                })
+                .collect();
+            let batched =
+                sum_buckets_batch::<Ep>(&all).expect("random buckets are not exceptional");
+            for (buckets, sum) in all.iter().zip(batched) {
+                assert_eq!(sum, sum_buckets::<Ep>(buckets));
+            }
+        }
+        // Equal points double and opposite points cancel.
+        let p = Ep::random(&mut rng);
+        let q = Ep::random(&mut rng);
+        for buckets in [
+            vec![Some(affine(p)), Some(affine(p))],
+            vec![Some(affine(p)), None, Some(affine(p)), Some(affine(-p))],
+            vec![Some(affine(-q)), Some(affine(q)), None, Some(affine(p))],
+        ] {
+            let all = vec![buckets];
+            let batched = sum_buckets_batch::<Ep>(&all).unwrap();
+            assert_eq!(batched[0], sum_buckets::<Ep>(&all[0]));
+        }
+    }
+}
+
+#[cfg(test)]
+mod digit_row_tests {
+    use super::*;
+    use crate::Ep;
+    use rand::{Rng, SeedableRng};
+
+    #[test]
+    fn digit_rows_match_booth_digits() {
+        let mut rng = rand_xorshift::XorShiftRng::from_seed([13u8; 16]);
+        let n = 300;
+        let components: Vec<(SignedMagnitude, SignedMagnitude)> = (0..n)
+            .map(|i| {
+                let m = |r: &mut rand_xorshift::XorShiftRng| {
+                    let v = (u128::from(r.next_u64()) << 64 | u128::from(r.next_u64()))
+                        >> (128 - GLV_COMPONENT_BITS);
+                    // Exercise the extremes too.
+                    match i % 7 {
+                        0 => 0,
+                        1 => (1u128 << GLV_COMPONENT_BITS) - 1,
+                        _ => v,
+                    }
+                };
+                (
+                    SignedMagnitude {
+                        negative: i % 3 == 0,
+                        magnitude: m(&mut rng),
+                    },
+                    SignedMagnitude {
+                        negative: i % 5 == 0,
+                        magnitude: m(&mut rng),
+                    },
+                )
+            })
+            .collect();
+        let point = <Ep as group::Group>::generator();
+        let mut bases = multiexp_bases::<Ep>(&vec![group::Curve::to_affine(&point); n]);
+        bases[7].identity = true;
+        for window_bits in 2..=MAX_DIGIT_ROW_BITS {
+            let window_count = GLV_COMPONENT_BITS / window_bits + 1;
+            let rows = booth_digit_rows(&components, &bases, window_bits, window_count);
+            for window in 0..window_count {
+                for (base, (first, second)) in components.iter().enumerate() {
+                    for (half, component) in [*first, *second].into_iter().enumerate() {
+                        let digit = booth_digit(component, window_bits, window);
+                        let expected = if bases[base].identity {
+                            0
+                        } else if digit.negative {
+                            -(digit.magnitude as i32)
+                        } else {
+                            digit.magnitude as i32
+                        };
+                        let got = rows[window * 2 * n + 2 * base + half];
+                        assert_eq!(
+                            i32::from(got),
+                            expected,
+                            "w={window_bits} window={window} base={base} half={half}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(all(test, feature = "multicore"))]
+mod remainder_slice_tests {
+    use super::*;
+    use crate::{Eq, EqAffine, Fp};
+    use ff::Field;
+    use group::{Curve, Group};
+    use rand::SeedableRng;
+
+    /// Pools whose width does not divide the window count split the leftover
+    /// windows into term slices; the sum must match the serial MSM.
+    #[test]
+    fn parallel_msm_with_sliced_leftover_windows_matches_serial() {
+        let mut rng = rand_xorshift::XorShiftRng::from_seed([21u8; 16]);
+        let n = 600;
+        let points: Vec<Eq> = (0..n).map(|_| Eq::random(&mut rng)).collect();
+        let mut bases = vec![EqAffine::default(); n];
+        Eq::batch_normalize(&points, &mut bases);
+        let scalars: Vec<Fp> = (0..n).map(|_| Fp::random(&mut rng)).collect();
+        let components: Vec<_> = scalars
+            .iter()
+            .map(|s| {
+                decompose_montgomery::<Eq>(s)
+                    .and_then(checked_signed_magnitudes)
+                    .unwrap()
+            })
+            .collect();
+        let bases = multiexp_bases::<Eq>(&bases);
+        for window_bits in [5, 7, 8, 10] {
+            let serial = multiexp_serial::<Eq>(&components, &bases, window_bits).unwrap();
+            for threads in [3, 5] {
+                let pool = maybe_rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                let parallel = pool
+                    .install(|| multiexp_parallel::<Eq>(&components, &bases, window_bits))
+                    .unwrap();
+                assert_eq!(parallel, serial, "w={window_bits} threads={threads}");
+            }
+        }
     }
 }
