@@ -4,6 +4,8 @@ use super::{PastaField, PrimeModulus, Reduced, ReductionState, TWO_ADICITY};
 
 #[cfg(feature = "sqrt-table-large")]
 mod large;
+#[cfg(all(feature = "sqrt-table-large", udon_avx2, not(miri)))]
+pub(super) use large::DIGIT_BITS;
 #[cfg(feature = "sqrt-table-large")]
 pub(super) use large::LargeSqrtTable;
 
@@ -85,6 +87,12 @@ impl<M: PrimeModulus> PastaField<M, Reduced> {
     /// short-circuit instead.
     pub(crate) fn sqrt_lanes<const L: usize>(values: &[Self; L]) -> [Option<Self>; L] {
         debug_assert!(values.iter().all(|value| !value.is_zero()));
+        // Whole vectors of lanes also take the table finish's squarings
+        // through the vector kernels.
+        #[cfg(all(feature = "sqrt-table-large", udon_avx2, not(miri)))]
+        if let Some(roots) = M::sqrt_large_vectors(values) {
+            return roots;
+        }
         let w = M::pow_sqrt_exponent_lanes(&values.map(Self::into_loose));
         core::array::from_fn(|lane| values[lane].sqrt_with_exponent(w[lane]))
     }

@@ -26,11 +26,15 @@ aarch64-asm = ["dep:cc"]
 # selected automatically when Rust's resolved target features include both
 # BMI2 and ADX, for example with `-C target-cpu=native` on a supporting CPU;
 # this forces it on, and unsupported CPUs fault unless `portable` is also
-# enabled. See the crate-level feature documentation.
+# enabled. Forcing the backend also compiles the AVX2 square-root kernels, so
+# the CPU must support AVX2 too: every Intel and AMD CPU with BMI2 and ADX
+# does. Automatic selection uses AVX2 only when the target enables it. See
+# the crate-level feature documentation.
 x86_64-asm = []
-# Disable the x86-64 assembly backend, even if `x86_64-asm` is also enabled or
-# the target features would select it. This does not undo CPU instructions
-# enabled by Rust's target flags and does not affect `aarch64-asm`.
+# Disable the x86-64 assembly backend and AVX2 kernels, even if `x86_64-asm`
+# is also enabled or the target features would select them. This does not
+# undo CPU instructions enabled by Rust's target flags and does not affect
+# `aarch64-asm`.
 portable = []
 
 [dependencies]
