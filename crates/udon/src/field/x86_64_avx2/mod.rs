@@ -4,9 +4,10 @@
 //! multiplier, so interleaving scalar chains gains little there. This module
 //! instead holds four field elements in one set of AVX2 registers, one element
 //! per 64-bit lane, and squares or multiplies all four with `vpmuludq`. It
-//! serves the exponentiation behind square roots (and so point decoding);
-//! [`PowerVectors`] is its only interface, and no radix-2^29 value leaves the
-//! module.
+//! serves the exponentiation behind square roots (and so point decoding)
+//! through [`PowerVectors`], and the affine additions of one level of a
+//! bucket's pair tree through [`chord_level`]. Those two are its interfaces,
+//! and no radix-2^29 value leaves the module.
 //!
 //! # Availability
 //!
@@ -781,4 +782,349 @@ impl<M: PrimeModulus, const G: usize> bento::addchain::AdditionChain for PowerVe
         }
         power
     }
+}
+
+// Affine chord additions.
+//
+// The values of this section stay in the scalar kernels' Montgomery domain.
+// `mul` computes `a * b / 2^261` where the scalar product divides by `2^256`,
+// so scaling one operand of each product by `2^5` (`shl5`) makes `mul` the
+// scalar Montgomery product, and no value is converted on the way in or out.
+//
+// `mul` is exact whenever limbs 0 to 7 of both inputs are below 2^29 and both
+// values are below 2^261; its result is below `a * b / 2^261 + p`. Both moduli
+// are `2^254 + d` with `d < 2^126`, so `p / 2^261` exceeds `1 / 128` by a
+// factor below `1 + 2^-128`, which the bounds stated below absorb. Subtraction
+// adds a multiple of `p` whose limbs dominate the subtrahend's
+// (`dominating_multiple`), so no limb goes negative, and every value stored or
+// returned is first reduced to `[0, p)` (`canonical`).
+
+/// Chord additions in flight: two vectors of four lanes, whose independent
+/// multiplication chains overlap.
+const CHORD_VECTORS: usize = 2;
+/// Additions per chunk of [`chord_level`].
+pub(crate) const CHORD_LANES: usize = LANES * CHORD_VECTORS;
+/// `2^SCALE_SHIFT` is the scale that makes `mul` the scalar Montgomery
+/// product: this module's radix over the scalar kernels'.
+const SCALE_SHIFT: i32 = (RADIX_BITS - SCALAR_RADIX_BITS) as i32;
+
+/// `c * p` in radix 2^29, with limbs 0 to 7 raised to at least `2^30 - 2` by
+/// borrowing from the next limb, so it dominates limb by limb any normalized
+/// subtrahend whose limb 8 is at most `c * 2^22 - 2`.
+///
+/// Each limb is computed in one expression, adding the `2^30` it receives
+/// before subtracting the `2` it lends: limbs 5 to 7 of both moduli are zero,
+/// so borrowing first would underflow.
+const fn dominating_multiple<M: PrimeModulus>(c: u64) -> [u64; LIMBS] {
+    let p = modulus_limbs::<M>();
+    let mut k = [0u64; LIMBS];
+    let mut i = 0;
+    while i < LIMBS {
+        let received = if i < LIMBS - 1 { 1 << (BITS + 1) } else { 0 };
+        let lent = if i > 0 { 2 } else { 0 };
+        k[i] = c * p[i] + received - lent;
+        i += 1;
+    }
+    k
+}
+
+/// The scalar Montgomery limbs of `2^SCALE_SHIFT`.
+const fn montgomery_scale<M: PrimeModulus>() -> Limbs {
+    let mut value = M::R;
+    let mut doublings = SCALE_SHIFT;
+    while doublings > 0 {
+        value = double_mod(&value, &M::MODULUS);
+        doublings -= 1;
+    }
+    value
+}
+
+/// Propagates carries so limbs 0 to 7 are below 2^29.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn normalize(mut v: [__m256i; LIMBS]) -> Vector {
+    let mask = _mm256_set1_epi64x(MASK as i64);
+    for i in 0..LIMBS - 1 {
+        let carry = _mm256_srli_epi64::<BITS>(v[i]);
+        v[i] = _mm256_and_si256(v[i], mask);
+        v[i + 1] = _mm256_add_epi64(v[i + 1], carry);
+    }
+    Vector(v)
+}
+
+/// `2^SCALE_SHIFT * a`.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn shl5(a: &Vector) -> Vector {
+    normalize(core::array::from_fn(|i| {
+        _mm256_slli_epi64::<SCALE_SHIFT>(a.0[i])
+    }))
+}
+
+/// `a + b`, for normalized `a` and `b`.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn add(a: &Vector, b: &Vector) -> Vector {
+    normalize(core::array::from_fn(|i| _mm256_add_epi64(a.0[i], b.0[i])))
+}
+
+/// `a + k - b`, for `k` from [`dominating_multiple`] dominating `b`.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn sub(a: &Vector, b: &Vector, k: &[u64; LIMBS]) -> Vector {
+    normalize(core::array::from_fn(|i| {
+        _mm256_sub_epi64(
+            _mm256_add_epi64(a.0[i], _mm256_set1_epi64x(k[i] as i64)),
+            b.0[i],
+        )
+    }))
+}
+
+/// Reduces a normalized value below `8p` (limb 8 at most `2^25`: `8p` exceeds
+/// `2^257`) to `[0, p)`.
+///
+/// `q = floor(v / 2^254)` is `limb 8 >> 22`; `v - q * p` lies in `[-p, p)`
+/// because `2^254 < p < 2^254 + 2^128`, so at most one `p` is added back.
+/// Limbs 0 to 7 get `2^32` added (borrowed as 8 from the next limb), so they
+/// stay non-negative for the logical carry shifts; only limb 8 carries the
+/// sign.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn canonical<M: PrimeModulus>(v: &Vector) -> Vector {
+    let p = const { modulus_limbs::<M>() };
+    let q = _mm256_srli_epi64::<TOP_LIMB_SHIFT>(v.0[LIMBS - 1]);
+    let mut t: [__m256i; LIMBS] = core::array::from_fn(|i| {
+        let qp = match i {
+            0 => q,
+            8 => _mm256_slli_epi64::<TOP_LIMB_SHIFT>(q),
+            _ => _mm256_mul_epu32(q, _mm256_set1_epi64x(p[i] as i64)),
+        };
+        let offset: i64 = match i {
+            0 => 1 << 32,
+            8 => -8,
+            _ => (1 << 32) - 8,
+        };
+        _mm256_sub_epi64(_mm256_add_epi64(v.0[i], _mm256_set1_epi64x(offset)), qp)
+    });
+    t = normalize(t).0;
+    let negative = _mm256_cmpgt_epi64(_mm256_setzero_si256(), t[LIMBS - 1]);
+    for (i, t) in t.iter_mut().enumerate() {
+        *t = _mm256_add_epi64(
+            *t,
+            _mm256_and_si256(negative, _mm256_set1_epi64x(p[i] as i64)),
+        );
+    }
+    normalize(t)
+}
+
+/// Exchanges rows and columns of four 256-bit values: output `k` holds word
+/// `k` of each input, and the map is its own inverse.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn transpose(v: [__m256i; 4]) -> [__m256i; 4] {
+    let low01 = _mm256_unpacklo_epi64(v[0], v[1]);
+    let high01 = _mm256_unpackhi_epi64(v[0], v[1]);
+    let low23 = _mm256_unpacklo_epi64(v[2], v[3]);
+    let high23 = _mm256_unpackhi_epi64(v[2], v[3]);
+    [
+        _mm256_permute2x128_si256::<0x20>(low01, low23),
+        _mm256_permute2x128_si256::<0x20>(high01, high23),
+        _mm256_permute2x128_si256::<0x31>(low01, low23),
+        _mm256_permute2x128_si256::<0x31>(high01, high23),
+    ]
+}
+
+/// Loads four little-endian 256-bit integers, one per lane.
+///
+/// A radix-2^29 limb is a bit slice of the integer, so the words are
+/// transposed into lanes and split with shifts; nothing is stored in radix
+/// 2^29.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn load4(values: [&Limbs; LANES]) -> Vector {
+    // SAFETY: each load reads exactly the 32 bytes of one `[u64; 4]`.
+    let words = transpose(values.map(|value| unsafe { _mm256_loadu_si256(value.as_ptr().cast()) }));
+    let mask = _mm256_set1_epi64x(MASK as i64);
+    Vector(core::array::from_fn(|i| {
+        let bit = i * BITS as usize;
+        let (word, shift) = (bit / 64, (bit % 64) as i64);
+        let mut limb = _mm256_srl_epi64(words[word], _mm_cvtsi64_si128(shift));
+        if shift + BITS as i64 > 64 && word + 1 < 4 {
+            limb = _mm256_or_si256(
+                limb,
+                _mm256_sll_epi64(words[word + 1], _mm_cvtsi64_si128(64 - shift)),
+            );
+        }
+        _mm256_and_si256(limb, mask)
+    }))
+}
+
+/// Stores four values below 2^256 with limbs 0 to 7 below 2^29 (as
+/// [`canonical`] leaves them) as little-endian 256-bit integers.
+#[target_feature(enable = "avx2")]
+#[inline]
+fn store4(v: &Vector) -> [Limbs; LANES] {
+    let mut words = [_mm256_setzero_si256(); 4];
+    for (i, limb) in v.0.iter().enumerate() {
+        let bit = i * BITS as usize;
+        let (word, shift) = (bit / 64, (bit % 64) as i64);
+        words[word] = _mm256_or_si256(
+            words[word],
+            _mm256_sll_epi64(*limb, _mm_cvtsi64_si128(shift)),
+        );
+        if shift + BITS as i64 > 64 && word + 1 < 4 {
+            words[word + 1] = _mm256_or_si256(
+                words[word + 1],
+                _mm256_srl_epi64(*limb, _mm_cvtsi64_si128(64 - shift)),
+            );
+        }
+    }
+    let mut out = [[0u64; 4]; LANES];
+    for (out, value) in out.iter_mut().zip(transpose(words)) {
+        // SAFETY: stores exactly the 32 bytes of one `[u64; 4]`.
+        unsafe { _mm256_storeu_si256(out.as_mut_ptr().cast(), value) };
+    }
+    out
+}
+
+/// The left and right operand of one chord addition, as canonical scalar
+/// Montgomery limbs: `[left x, left y, right x, right y]`.
+pub(crate) type ChordOperands = [Limbs; 4];
+
+/// The points, scratch, and field inversion of one [`chord_level`], which the
+/// caller owns; every value crossing this interface is a canonical residue in
+/// scalar Montgomery limbs.
+pub(crate) trait ChordStorage {
+    /// The operands of addition `pair`.
+    fn operands(&self, pair: usize) -> ChordOperands;
+    /// Receives the sum of addition `pair`.
+    fn emit(&mut self, pair: usize, x: Limbs, y: Limbs);
+    /// Returns the value last given to [`Self::set_scratch`] for `pair`.
+    fn scratch(&self, pair: usize) -> Limbs;
+    /// Keeps one value per addition between the level's two passes.
+    fn set_scratch(&mut self, pair: usize, value: Limbs);
+    /// Replaces eight nonzero residues by [`chord_inverse_scale`] times their
+    /// inverses, or returns `false` if one of them is zero: the level's one
+    /// field inversion, which the scalar kernels supply.
+    fn invert(&mut self, lanes: &mut [Limbs; CHORD_LANES]) -> bool;
+}
+
+/// One level of affine chord additions: `storage` receives the sum of the
+/// operands of every pair below `pairs`, in increasing order.
+///
+/// The x-coordinates of each pair must differ. When some pair's do not, this
+/// returns `false` before the first [`ChordStorage::emit`]; the caller then
+/// takes a path that handles doublings and cancellations.
+///
+/// Pair `i`'s operands are read twice, both times before its own sum is
+/// emitted and before the sum of any pair from `i + LANES` on, so sum `i` may
+/// overwrite operands `2i` and `2i + 1` of one array.
+///
+/// The lane products run from the last chunk to the first so that the sums
+/// are recovered first to last. Bounds: differences are below `3p` and their
+/// scaled forms below `96p < 2^261`; lane products, scaled numerators and
+/// running inverses stay below `4.01p` (a bound `B p` becomes at most
+/// `96 B p^2 / 2^261 + p`, whose fixed point exceeds `4p` by less than
+/// `2^-120 p`); the slope is below `1.126p`, `x3` below `4.32p`, `x - x3`
+/// below `6p`, and `y3` below `4.69p`.
+#[target_feature(enable = "avx2")]
+fn chord_level_avx2<M: PrimeModulus, S: ChordStorage>(pairs: usize, storage: &mut S) -> bool {
+    let k2 = const { dominating_multiple::<M>(2) };
+    let k3 = const { dominating_multiple::<M>(3) };
+    let k5 = const { dominating_multiple::<M>(5) };
+    // A padding lane adds (1, 0) and (0, 0): its difference, -1, is a unit,
+    // so it leaves the lane product invertible, and its sum is never emitted.
+    let padding: ChordOperands = [M::R, [0; 4], [0; 4], [0; 4]];
+    let group = |storage: &S, first: usize| -> [ChordOperands; LANES] {
+        core::array::from_fn(|lane| {
+            if first + lane < pairs {
+                storage.operands(first + lane)
+            } else {
+                padding
+            }
+        })
+    };
+    let coordinate = |group: &[ChordOperands; LANES], index: usize| -> Vector {
+        load4(core::array::from_fn(|lane| &group[lane][index]))
+    };
+    let chunks = pairs.div_ceil(CHORD_LANES);
+
+    let mut products = [pack(&[const { montgomery_scale::<M>() }; LANES]); CHORD_VECTORS];
+    for chunk in (0..chunks).rev() {
+        for (vector, product) in products.iter_mut().enumerate() {
+            let first = chunk * CHORD_LANES + vector * LANES;
+            let group = group(storage, first);
+            let (lx, ly) = (coordinate(&group, 0), coordinate(&group, 1));
+            let (rx, ry) = (coordinate(&group, 2), coordinate(&group, 3));
+            let numerator = shl5(&sub(&ry, &ly, &k2));
+            let denominator = shl5(&sub(&rx, &lx, &k2));
+            let scaled = store4(&canonical::<M>(&mul::<M>(&numerator, product)));
+            *product = mul::<M>(product, &denominator);
+            for (lane, scaled) in scaled.iter().enumerate() {
+                if first + lane < pairs {
+                    storage.set_scratch(first + lane, *scaled);
+                }
+            }
+        }
+    }
+
+    let mut inverses = [[0u64; 4]; CHORD_LANES];
+    for (vector, product) in products.iter().enumerate() {
+        inverses[vector * LANES..][..LANES].copy_from_slice(&store4(&canonical::<M>(product)));
+    }
+    if !storage.invert(&mut inverses) {
+        return false;
+    }
+    let mut inverses: [Vector; CHORD_VECTORS] = core::array::from_fn(|vector| {
+        load4(core::array::from_fn(|lane| {
+            &inverses[vector * LANES + lane]
+        }))
+    });
+
+    for chunk in 0..chunks {
+        for (vector, inverse) in inverses.iter_mut().enumerate() {
+            let first = chunk * CHORD_LANES + vector * LANES;
+            let group = group(storage, first);
+            let (lx, ly, rx) = (
+                coordinate(&group, 0),
+                coordinate(&group, 1),
+                coordinate(&group, 2),
+            );
+            let denominator = shl5(&sub(&rx, &lx, &k2));
+            let scaled: [Limbs; LANES] = core::array::from_fn(|lane| {
+                if first + lane < pairs {
+                    storage.scratch(first + lane)
+                } else {
+                    [0; 4]
+                }
+            });
+            let scaled = load4(core::array::from_fn(|lane| &scaled[lane]));
+            let slope = mul::<M>(&scaled, inverse);
+            *inverse = mul::<M>(inverse, &denominator);
+            let slope_scaled = shl5(&slope);
+            let x3 = sub(&mul::<M>(&slope, &slope_scaled), &add(&lx, &rx), &k3);
+            let y3 = sub(&mul::<M>(&slope_scaled, &sub(&lx, &x3, &k5)), &ly, &k2);
+            let xs = store4(&canonical::<M>(&x3));
+            let ys = store4(&canonical::<M>(&y3));
+            for lane in 0..LANES {
+                if first + lane < pairs {
+                    storage.emit(first + lane, xs[lane], ys[lane]);
+                }
+            }
+        }
+    }
+    true
+}
+
+/// [`chord_level_avx2`], callable from code compiled without AVX2.
+#[inline]
+pub(crate) fn chord_level<M: PrimeModulus, S: ChordStorage>(pairs: usize, storage: &mut S) -> bool {
+    // SAFETY: this module is compiled only for CPUs with AVX2.
+    unsafe { chord_level_avx2::<M, S>(pairs, storage) }
+}
+
+/// The scale [`ChordStorage::invert`] applies to each inverse, as scalar
+/// Montgomery limbs.
+pub(crate) const fn chord_inverse_scale<M: PrimeModulus>() -> Limbs {
+    montgomery_scale::<M>()
 }

@@ -102,15 +102,15 @@
 //! portable forms, which x86-64 compiles at least as well.
 //!
 //! The x86-64 builds also carry four-lane AVX2 kernels for the square-root
-//! exponentiation behind point decoding. They are compiled when the target
-//! enables AVX2, with or without the assembly backend, and when `x86_64-asm`
-//! forces that backend: the feature's CPU requirement is therefore BMI2, ADX,
-//! and AVX2, which every Intel and AMD CPU with the first two meets. A target
-//! that selects the assembly backend through ADX and BMI2 alone gets no AVX2
-//! code. As with the assembly there is no runtime dispatch, `portable`
-//! disables the kernels, Miri does not run them, and their unsafe code is
-//! confined to one module; results are the same field values on every
-//! backend.
+//! exponentiation behind point decoding and for the affine additions that sum
+//! one bucket of points. They are compiled when the target enables AVX2, with
+//! or without the assembly backend, and when `x86_64-asm` forces that
+//! backend: the feature's CPU requirement is therefore BMI2, ADX, and AVX2,
+//! which every Intel and AMD CPU with the first two meets. A target that
+//! selects the assembly backend through ADX and BMI2 alone gets no AVX2 code.
+//! As with the assembly there is no runtime dispatch, `portable` disables the
+//! kernels, Miri does not run them, and their unsafe code is confined to one
+//! module; results are the same field values and points on every backend.
 //!
 //! Cargo features are additive: any consumer enabling `sqrt-table-large`,
 //! `aarch64-asm`, `x86_64-asm`, or `portable` selects it for that Udon build.
