@@ -36,6 +36,8 @@ pub(crate) use x86_64_asm as asm;
 #[cfg(feature = "traits")]
 mod consumer;
 pub(crate) mod pasta;
+#[cfg(all(udon_avx2, not(miri)))]
+pub(crate) mod x86_64_avx2;
 
 #[cfg(feature = "traits")]
 pub use consumer::{Field, FieldAdapter};

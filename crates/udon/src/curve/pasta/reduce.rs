@@ -20,6 +20,11 @@ pub(super) fn sum<C: PastaCurve>(
     // without imposing a normalization inversion on the returned sum.
     while lens[0] > 16 {
         let count = lens[0];
+        #[cfg(all(udon_avx2, not(miri)))]
+        if count / 2 >= VECTOR_LEVEL_PAIRS && vector_level::<C>(&mut points[..count], fields) {
+            lens[0] = count.div_ceil(2);
+            continue;
+        }
         reduce_fused::<C, true>(&mut points[..count], &[0], &mut lens, fields);
     }
     let mut sum = ProjectivePoint::IDENTITY;
@@ -27,6 +32,99 @@ pub(super) fn sum<C: PastaCurve>(
         sum = sum.add_mixed(point);
     }
     sum
+}
+
+/// The fewest pairs for which one level in AVX2 vectors is used: one full
+/// chunk of the vector kernel.
+#[cfg(all(udon_avx2, not(miri)))]
+const VECTOR_LEVEL_PAIRS: usize = crate::field::x86_64_avx2::CHORD_LANES;
+
+/// One pair-tree level of a single bucket in AVX2 vectors: `points[i]`
+/// becomes `points[2i] + points[2i + 1]`, and an odd last point moves down
+/// behind the sums. Returns `false`, with `points` unchanged, when a pair
+/// shares an x-coordinate; the scalar level handles those.
+///
+/// `fields` holds one value per pair.
+#[cfg(all(udon_avx2, not(miri)))]
+fn vector_level<C: PastaCurve>(
+    points: &mut [AffinePoint<C>],
+    fields: &mut [PastaField<C::Base>],
+) -> bool {
+    use crate::field::x86_64_avx2::{
+        CHORD_LANES, ChordOperands, ChordStorage, chord_inverse_scale, chord_level,
+    };
+
+    struct Level<'a, C: PastaCurve> {
+        points: &'a mut [AffinePoint<C>],
+        fields: &'a mut [PastaField<C::Base>],
+    }
+
+    impl<C: PastaCurve> ChordStorage for Level<'_, C> {
+        #[inline(always)]
+        fn operands(&self, pair: usize) -> ChordOperands {
+            let (left, right) = (&self.points[2 * pair], &self.points[2 * pair + 1]);
+            [
+                left.x.montgomery_limbs(),
+                left.y.montgomery_limbs(),
+                right.x.montgomery_limbs(),
+                right.y.montgomery_limbs(),
+            ]
+        }
+
+        #[inline(always)]
+        fn emit(&mut self, pair: usize, x: [u64; 4], y: [u64; 4]) {
+            self.points[pair] = AffinePoint {
+                x: PastaField::from_montgomery_limbs(x),
+                y: PastaField::from_montgomery_limbs(y),
+                marker: PhantomData,
+            };
+        }
+
+        #[inline(always)]
+        fn scratch(&self, pair: usize) -> [u64; 4] {
+            self.fields[pair].montgomery_limbs()
+        }
+
+        #[inline(always)]
+        fn set_scratch(&mut self, pair: usize, value: [u64; 4]) {
+            self.fields[pair] = PastaField::from_montgomery_limbs(value);
+        }
+
+        // Montgomery's trick across the eight lane products.
+        fn invert(&mut self, lanes: &mut [[u64; 4]; CHORD_LANES]) -> bool {
+            let values = lanes.map(PastaField::<C::Base>::from_montgomery_limbs);
+            let mut prefixes = [PastaField::<C::Base>::ONE; CHORD_LANES];
+            let mut product = PastaField::ONE;
+            for (prefix, value) in prefixes.iter_mut().zip(&values) {
+                *prefix = product;
+                product = product.mul(value);
+            }
+            let Some(mut inverse) = product.invert() else {
+                return false;
+            };
+            let scale = const {
+                PastaField::<C::Base>::from_montgomery_limbs(chord_inverse_scale::<C::Base>())
+            };
+            for lane in (0..CHORD_LANES).rev() {
+                lanes[lane] = inverse
+                    .mul(&prefixes[lane])
+                    .mul(&scale)
+                    .reduce()
+                    .montgomery_limbs();
+                inverse = inverse.mul(&values[lane]);
+            }
+            true
+        }
+    }
+
+    let pairs = points.len() / 2;
+    if !chord_level::<C::Base, _>(pairs, &mut Level { points, fields }) {
+        return false;
+    }
+    if !points.len().is_multiple_of(2) {
+        points[pairs] = points[points.len() - 1];
+    }
+    true
 }
 
 /// Reduces disjoint buckets to zero or one affine point, updating their lengths.

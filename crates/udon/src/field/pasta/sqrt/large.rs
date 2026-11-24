@@ -30,6 +30,9 @@ pub(in crate::field) struct LargeSqrtTable<F> {
     inverse: [u8; 1024],
 }
 
+/// Bits of the inverse exponent that one table lookup recovers.
+pub(in crate::field) const DIGIT_BITS: usize = 8;
+
 // Hash the low 32 bits of a reduced Montgomery residue into ten bits.
 // from_powers checks injectivity on the order-256 subgroup for each field.
 const fn hash(key: u32, multiplier: u32) -> usize {
@@ -106,21 +109,33 @@ impl<M: PrimeModulus> LargeSqrtTable<PastaField<M, Reduced>> {
         t: PastaField<M>,
         multiplier: u32,
     ) -> (bool, PastaField<M>) {
-        let inverse = |x: PastaField<M>| {
-            self.inverse[hash(x.reduce().montgomery_limbs()[0] as u32, multiplier)] as u32
-        };
         // Squaring stays loose; only the hash key needs a unique representative.
-        let square_eight = |x: PastaField<M>| {
+        let square_digit = |x: PastaField<M>| {
             PastaField::from_montgomery(crate::field::pasta::montgomery::square_run::<M>(
                 &x.montgomery_limbs(),
-                8,
+                DIGIT_BITS,
                 None,
             ))
         };
         let x3 = t;
-        let x2 = square_eight(x3);
-        let x1 = square_eight(x2);
-        let x0 = square_eight(x1);
+        let x2 = square_digit(x3);
+        let x1 = square_digit(x2);
+        let x0 = square_digit(x1);
+        self.finish_with_powers(x, [x0, x1, x2, x3], multiplier)
+    }
+
+    /// Completes [`Self::finish`] from `t`'s powers: `powers[3] = t`, and each
+    /// earlier entry is the next one squared [`DIGIT_BITS`] times. A backend
+    /// that squares several inputs together supplies them directly.
+    pub(in crate::field) fn finish_with_powers(
+        &self,
+        x: PastaField<M>,
+        [x0, x1, x2, x3]: [PastaField<M>; 4],
+        multiplier: u32,
+    ) -> (bool, PastaField<M>) {
+        let inverse = |x: PastaField<M>| {
+            self.inverse[hash(x.reduce().montgomery_limbs()[0] as u32, multiplier)] as u32
+        };
 
         // Recover e such that x3 * r^e = 1, one byte at a time.
         // Each correction puts the next hash input in the order-256 subgroup.

@@ -31,9 +31,16 @@
 //! call boundary and its memory round trip measured dearer than the spills
 //! it avoids (multiplication 15.0 ns inlined against 15.6 ns called, squaring
 //! 12.9 ns against 16.1 ns, and 1024-term inner products 8.2 µs against
-//! 13.9 µs on Skylake-X), and the allocator spills callers' values around
-//! the block rather than failing. The repeated-square chains loop in Rust
-//! around the inlined square, so no external assembler is needed.
+//! 13.9 µs on Skylake-X). The allocator spills callers' values around a
+//! block only while a register remains for the block itself: a caller that
+//! keeps both a frame pointer and a base pointer has exactly thirteen, and
+//! an inlined block asking for all of them fails to compile there ("inline
+//! assembly requires more registers than available"; seen with thin LTO and
+//! one codegen unit). No inlined block may therefore take more than twelve.
+//! The squaring needs twelve for its arithmetic, so it reads its parameter
+//! block relative to the instruction pointer instead of through a pointer
+//! register. The repeated-square chains loop in Rust around the inlined
+//! square, so no external assembler is needed.
 //!
 //! Arithmetic bounds concern correctness, not memory validity. Every block
 //! reads only the fixed-size arrays behind its declared pointers and has no
@@ -64,6 +71,43 @@ fn params<M: PrimeModulus>() -> &'static [u64; 5] {
             M::MONTGOMERY_INV,
         ]
     }
+}
+
+/// Both moduli's parameter blocks, in the layout of [`params`], for kernels
+/// with no register to spare for a pointer: they address their block
+/// relative to the instruction pointer at [`parameter_offset`].
+static PARAMETER_TABLE: [[u64; 5]; 2] = [
+    parameter_block::<super::pasta::PallasBase>(),
+    parameter_block::<super::pasta::PallasScalar>(),
+];
+
+const fn parameter_block<M: PrimeModulus>() -> [u64; 5] {
+    [
+        M::MODULUS[0],
+        M::MODULUS[1],
+        M::MODULUS[2],
+        M::MODULUS[3],
+        M::MONTGOMERY_INV,
+    ]
+}
+
+/// The byte offset of `M`'s block in [`PARAMETER_TABLE`].
+const fn parameter_offset<M: PrimeModulus>() -> usize {
+    let block = parameter_block::<M>();
+    let mut index = 0;
+    while index < PARAMETER_TABLE.len() {
+        let entry = &PARAMETER_TABLE[index];
+        if entry[0] == block[0]
+            && entry[1] == block[1]
+            && entry[2] == block[2]
+            && entry[3] == block[3]
+            && entry[4] == block[4]
+        {
+            return index * size_of::<[u64; 5]>();
+        }
+        index += 1;
+    }
+    panic!("the parameter table holds every Pasta modulus")
 }
 
 #[inline(always)]
@@ -180,15 +224,23 @@ macro_rules! square_wide {
 /// so the reduced value ends in `{cy}, {z0}, {z1}, {z2}`. Reads the
 /// parameters at `{p}` and clobbers `{t1}`, `{t2}`, and `rdx`. Each step's
 /// sum is below `2^256 + 2^64 * p < 2^319`, so the shifted window fits four
-/// limbs and the carried limb stays below `2^63`.
+/// limbs and the carried limb stays below `2^63`. The one-argument form reads
+/// the parameters through the given address expression instead of `{p}`.
 macro_rules! cancel_low_half {
     () => {
+        cancel_low_half!("{p}")
+    };
+    ($p:literal) => {
         concat!(
             // Step 0: window [z0, z1, z2, z3], carry into cy.
             "mov rdx, {z0}\n",
-            "imul rdx, qword ptr [{p} + 32]\n",
+            "imul rdx, qword ptr [",
+            $p,
+            " + 32]\n",
             // t1/t2 = low/high(q*p1).
-            "mulx {t2}, {t1}, qword ptr [{p} + 8]\n",
+            "mulx {t2}, {t1}, qword ptr [",
+            $p,
+            " + 8]\n",
             "mov {cy}, rdx\n",
             // low(q*p3); p2 is zero.
             "shl {cy}, 62\n",
@@ -201,7 +253,9 @@ macro_rules! cancel_low_half {
             "mov {cy}, 0\n",
             "adc {cy}, 0\n",
             // t1 = high(q*p0); the low half is spent.
-            "mulx {t1}, {z0}, qword ptr [{p}]\n",
+            "mulx {t1}, {z0}, qword ptr [",
+            $p,
+            "]\n",
             "mov {z0}, rdx\n",
             "shr {z0}, 2\n",
             "add {z1}, {t1}\n",
@@ -210,8 +264,12 @@ macro_rules! cancel_low_half {
             "adc {cy}, {z0}\n",
             // Step 1: window [z1, z2, z3, cy], carry into z0.
             "mov rdx, {z1}\n",
-            "imul rdx, qword ptr [{p} + 32]\n",
-            "mulx {t2}, {t1}, qword ptr [{p} + 8]\n",
+            "imul rdx, qword ptr [",
+            $p,
+            " + 32]\n",
+            "mulx {t2}, {t1}, qword ptr [",
+            $p,
+            " + 8]\n",
             "mov {z0}, rdx\n",
             "shl {z0}, 62\n",
             "neg {z1}\n",
@@ -220,7 +278,9 @@ macro_rules! cancel_low_half {
             "adc {cy}, {z0}\n",
             "mov {z0}, 0\n",
             "adc {z0}, 0\n",
-            "mulx {t1}, {z1}, qword ptr [{p}]\n",
+            "mulx {t1}, {z1}, qword ptr [",
+            $p,
+            "]\n",
             "mov {z1}, rdx\n",
             "shr {z1}, 2\n",
             "add {z2}, {t1}\n",
@@ -229,8 +289,12 @@ macro_rules! cancel_low_half {
             "adc {z0}, {z1}\n",
             // Step 2: window [z2, z3, cy, z0], carry into z1.
             "mov rdx, {z2}\n",
-            "imul rdx, qword ptr [{p} + 32]\n",
-            "mulx {t2}, {t1}, qword ptr [{p} + 8]\n",
+            "imul rdx, qword ptr [",
+            $p,
+            " + 32]\n",
+            "mulx {t2}, {t1}, qword ptr [",
+            $p,
+            " + 8]\n",
             "mov {z1}, rdx\n",
             "shl {z1}, 62\n",
             "neg {z2}\n",
@@ -239,7 +303,9 @@ macro_rules! cancel_low_half {
             "adc {z0}, {z1}\n",
             "mov {z1}, 0\n",
             "adc {z1}, 0\n",
-            "mulx {t1}, {z2}, qword ptr [{p}]\n",
+            "mulx {t1}, {z2}, qword ptr [",
+            $p,
+            "]\n",
             "mov {z2}, rdx\n",
             "shr {z2}, 2\n",
             "add {z3}, {t1}\n",
@@ -248,8 +314,12 @@ macro_rules! cancel_low_half {
             "adc {z1}, {z2}\n",
             // Step 3: window [z3, cy, z0, z1], carry into z2.
             "mov rdx, {z3}\n",
-            "imul rdx, qword ptr [{p} + 32]\n",
-            "mulx {t2}, {t1}, qword ptr [{p} + 8]\n",
+            "imul rdx, qword ptr [",
+            $p,
+            " + 32]\n",
+            "mulx {t2}, {t1}, qword ptr [",
+            $p,
+            " + 8]\n",
             "mov {z2}, rdx\n",
             "shl {z2}, 62\n",
             "neg {z3}\n",
@@ -258,7 +328,9 @@ macro_rules! cancel_low_half {
             "adc {z1}, {z2}\n",
             "mov {z2}, 0\n",
             "adc {z2}, 0\n",
-            "mulx {t1}, {z3}, qword ptr [{p}]\n",
+            "mulx {t1}, {z3}, qword ptr [",
+            $p,
+            "]\n",
             "mov {z3}, rdx\n",
             "shr {z3}, 2\n",
             "add {cy}, {t1}\n",
@@ -646,13 +718,14 @@ pub(crate) fn square<M: PrimeModulus>(value: &Limbs) -> Limbs {
     unsafe {
         asm!(
             square_wide!("[{cy}]", "[{cy} + 8]", "[{cy} + 16]", "[{cy} + 24]"),
-            cancel_low_half!(),
+            cancel_low_half!("rip + {table} + {offset}"),
             "add {cy}, {z4}",
             "adc {z0}, {z5}",
             "adc {z1}, {z6}",
             "adc {z2}, {z7}",
             cy = inout(reg) value.as_ptr() => o0,
-            p = in(reg) params::<M>().as_ptr(),
+            table = sym PARAMETER_TABLE,
+            offset = const parameter_offset::<M>(),
             z0 = out(reg) o1,
             z1 = out(reg) o2,
             z2 = out(reg) o3,

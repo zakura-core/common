@@ -1152,10 +1152,26 @@ fn absorb_instances(
         _ => None,
     };
     let mut projective = vec![VestaProjective::IDENTITY; statements.len()];
+    let joint = if tuning::INSTANCE_JOINT_SUM {
+        udon::curve::FixedBaseTable::sum_scratch_len(&tables[1..]).expect("instance tables fit")
+    } else {
+        0
+    };
+    let mut joint_affine = vec![VestaAffine::GENERATOR; joint];
+    let mut joint_field = vec![Fq::ZERO; joint];
     for (statement, point) in statements.iter().zip(&mut projective) {
         let anchor = shared_anchor
             .unwrap_or_else(|| FixedGenerator::sum_tables(&tables[..1], &statement[..1]));
-        let rest = FixedGenerator::sum_tables(&tables[1..], &statement[1..instance_len]);
+        let rest = if tuning::INSTANCE_JOINT_SUM {
+            udon::curve::FixedBaseTable::sum(
+                &tables[1..],
+                &statement[1..instance_len],
+                &mut joint_affine,
+                &mut joint_field,
+            )
+        } else {
+            FixedGenerator::sum_tables(&tables[1..], &statement[1..instance_len])
+        };
         *point = anchor
             .add(&rest)
             .add_mixed(&PREPARED_POINTS.blind_generator);
