@@ -6,7 +6,7 @@ use rand_core::{CryptoRng, Rng};
 
 use super::SaplingVerificationContextInner;
 use crate::{
-    bundle::{Authorized, Bundle},
+    bundle::{Authorized, Bundle, SignatureDigests},
     circuit::{OutputVerifyingKey, SpendVerifyingKey},
 };
 
@@ -86,10 +86,13 @@ impl BatchValidator {
     /// `BatchValidator` can continue to be used regardless, but some or all of the proofs
     /// and signatures from this bundle may have already been added to the batch even if
     /// it fails other consensus rules.
+    ///
+    /// `sighashes` supplies the digest each signature signs: a `[u8; 32]` for a bundle of
+    /// a transaction before v7, whose signatures share one digest.
     pub fn check_bundle<V: Copy + Into<i64>>(
         &mut self,
         bundle: Bundle<Authorized, V>,
-        sighash: [u8; 32],
+        sighashes: impl SignatureDigests,
     ) -> bool {
         self.bundles_added = true;
 
@@ -100,7 +103,20 @@ impl BatchValidator {
         let spend_proofs = read_proofs(bundle.shielded_spends().iter().map(|s| s.zkproof()));
         let output_proofs = read_proofs(bundle.shielded_outputs().iter().map(|o| o.zkproof()));
 
-        for (spend, zkproof) in bundle.shielded_spends().iter().zip(spend_proofs) {
+        // A bundle whose signatures the digests do not cover cannot be valid.
+        let Some(spend_auth_sighashes) = (0..bundle.shielded_spends().len())
+            .map(|index| sighashes.spend_auth(index))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return false;
+        };
+
+        for (index, (spend, zkproof)) in bundle
+            .shielded_spends()
+            .iter()
+            .zip(spend_proofs)
+            .enumerate()
+        {
             let zkproof = match zkproof {
                 Some(p) => p,
                 None => return false,
@@ -120,7 +136,7 @@ impl BatchValidator {
                         .queue(redjubjub::batch::Item::from_spendauth_key(
                             *rk,
                             *spend.spend_auth_sig(),
-                            &sighash,
+                            &spend_auth_sighashes[index],
                         ));
                     true
                 },
@@ -170,7 +186,7 @@ impl BatchValidator {
                 .queue(redjubjub::batch::Item::from_binding_key(
                     bvk,
                     bundle.authorization().binding_sig,
-                    &sighash,
+                    &sighashes.binding(),
                 ));
             true
         })
@@ -440,6 +456,80 @@ mod tests {
                 assert_eq!(validator.signatures.verify(&mut rng).is_ok(), valid);
             }
         }
+    }
+
+    /// Each spend authorization signature is checked against the digest for its own
+    /// position, and the binding signature against its own digest.
+    #[test]
+    fn signatures_are_checked_against_their_own_digests() {
+        use crate::{
+            Nullifier,
+            bundle::{Authorized, Bundle, SignatureDigests, SpendDescription},
+            constants::GROTH_PROOF_SIZE,
+            value::{NoteValue, TrapdoorSum, ValueCommitTrapdoor, ValueCommitment},
+        };
+
+        struct Digests([[u8; 32]; 2], [u8; 32]);
+        impl SignatureDigests for Digests {
+            fn spend_auth(&self, index: usize) -> Option<[u8; 32]> {
+                self.0.get(index).copied()
+            }
+            fn binding(&self) -> [u8; 32] {
+                self.1
+            }
+        }
+        let digests = Digests([[1; 32], [2; 32]], [3; 32]);
+
+        let mut rng = rand::rng();
+        let proof = groth16::Proof::<Bls12> {
+            a: bls12_381::G1Affine::generator(),
+            b: G2Affine::generator(),
+            c: bls12_381::G1Affine::generator(),
+        };
+        let mut proof_bytes = [0; GROTH_PROOF_SIZE];
+        proof.write(&mut proof_bytes[..]).unwrap();
+        let mut trapdoor_sum = TrapdoorSum::zero();
+        let spends = (0..2)
+            .map(|index| {
+                let sk = redjubjub::SigningKey::<redjubjub::SpendAuth>::new(&mut rng);
+                let trapdoor = ValueCommitTrapdoor::from_bytes([7 + index as u8; 32]).unwrap();
+                trapdoor_sum += &trapdoor;
+                SpendDescription::<Authorized>::from_parts(
+                    ValueCommitment::derive(NoteValue::ZERO, trapdoor),
+                    Scalar::zero(),
+                    Nullifier([index as u8; 32]),
+                    redjubjub::VerificationKey::from(&sk),
+                    proof_bytes,
+                    sk.sign(&mut rng, &digests.spend_auth(index).unwrap()),
+                )
+            })
+            .collect();
+        let bundle = Bundle::from_parts(
+            spends,
+            vec![],
+            0i64,
+            Authorized {
+                binding_sig: trapdoor_sum.into_bsk().sign(&mut rng, &digests.binding()),
+            },
+        )
+        .unwrap();
+
+        let check = |sighashes: &dyn Fn(&mut BatchValidator, Bundle<Authorized, i64>) -> bool| {
+            let mut validator = BatchValidator::new();
+            assert!(sighashes(&mut validator, bundle.clone()));
+            validator.signatures.verify(rand::rng()).is_ok()
+        };
+        assert!(check(
+            &|v, b| v.check_bundle(b, Digests([[1; 32], [2; 32]], [3; 32]))
+        ));
+        // Swapped spend digests, a shared digest, and a wrong binding digest all fail.
+        assert!(!check(
+            &|v, b| v.check_bundle(b, Digests([[2; 32], [1; 32]], [3; 32]))
+        ));
+        assert!(!check(&|v, b| v.check_bundle(b, [1; 32])));
+        assert!(!check(
+            &|v, b| v.check_bundle(b, Digests([[1; 32], [2; 32]], [4; 32]))
+        ));
     }
 
     #[test]

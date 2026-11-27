@@ -5,6 +5,9 @@ use crate::backend::prelude::*;
 use alloc::vec::Vec;
 
 pub mod commitments;
+mod signature_digests;
+
+pub use signature_digests::SignatureDigests;
 
 #[cfg(feature = "verifier")]
 mod batch;

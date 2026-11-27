@@ -4,7 +4,7 @@ use incrementalmerkletree::{Hashable, Marking, Retention};
 use orchard::{
     Address, Bundle,
     builder::{Builder, BundleType},
-    bundle::{Authorized, BatchValidator, BundleVersion, Flags, TxVersion},
+    bundle::{Authorized, BatchValidator, BundleVersion, Flags, SignatureDigests, TxVersion},
     circuit::{OrchardCircuitVersion, ProvingKey, VerifyingKey},
     keys::{FullViewingKey, PreparedIncomingViewingKey, Scope, SpendAuthorizingKey, SpendingKey},
     note::{ExtractedNoteCommitment, NoteVersion},
@@ -157,7 +157,7 @@ fn bundle_chain() {
             Some(NoteValue::from_raw(5000))
         );
 
-        let sighash = unauthorized
+        let sighash: [u8; 32] = unauthorized
             .commitment(TxVersion::V6)
             .expect("bundle flags are representable in this format")
             .into();
@@ -197,7 +197,7 @@ fn bundle_chain() {
             Ok(())
         );
         let (unauthorized, _) = builder.build(&mut rng).unwrap().unwrap();
-        let sighash = unauthorized
+        let sighash: [u8; 32] = unauthorized
             .commitment(TxVersion::V6)
             .expect("bundle flags are representable in this format")
             .into();
@@ -478,7 +478,7 @@ fn post_nu6_3_restricted_bundle_chain() {
                 .is_none()
         );
 
-        let sighash = unauthorized
+        let sighash: [u8; 32] = unauthorized
             .commitment(TxVersion::V5)
             .expect("bundle flags are representable in this format")
             .into();
@@ -496,10 +496,11 @@ fn post_nu6_3_restricted_bundle_chain() {
     validator
         .add_bundle(
             &restricted_bundle,
-            restricted_bundle
-                .commitment(TxVersion::V5)
-                .expect("bundle flags are representable in this format")
-                .into(),
+            <[u8; 32]>::from(
+                restricted_bundle
+                    .commitment(TxVersion::V5)
+                    .expect("bundle flags are representable in this format"),
+            ),
         )
         .unwrap();
     assert!(validator.validate(&mut rng));
@@ -511,10 +512,11 @@ fn post_nu6_3_restricted_bundle_chain() {
         validator
             .add_bundle(
                 &restricted_bundle,
-                restricted_bundle
-                    .commitment(TxVersion::V5)
-                    .expect("bundle flags are representable in this format")
-                    .into(),
+                <[u8; 32]>::from(
+                    restricted_bundle
+                        .commitment(TxVersion::V5)
+                        .expect("bundle flags are representable in this format"),
+                ),
             )
             .is_err()
     );
@@ -593,7 +595,7 @@ fn ironwood_post_nu6_3_unrestricted_bundle_proves_and_verifies() {
         .expect("flags are representable under Ironwood");
     assert_eq!(flag_byte & 0b100, 0b100);
 
-    let sighash = unauthorized
+    let sighash: [u8; 32] = unauthorized
         .commitment(TxVersion::V6)
         .expect("bundle flags are representable in this format")
         .into();
@@ -603,4 +605,160 @@ fn ironwood_post_nu6_3_unrestricted_bundle_proves_and_verifies() {
         .unwrap();
 
     verify_bundle(&bundle, post_nu6_3_vk, TxVersion::V6);
+}
+
+/// Signature digests that differ for every signature, as in a v7 transaction.
+struct PerSignatureDigests;
+
+impl SignatureDigests for PerSignatureDigests {
+    fn spend_auth(&self, index: usize) -> Option<[u8; 32]> {
+        Some([u8::try_from(index).unwrap() + 1; 32])
+    }
+
+    fn binding(&self) -> [u8; 32] {
+        [0xbb; 32]
+    }
+}
+
+/// Signature digests that swap the first two spend authorization digests.
+struct SwappedDigests;
+
+impl SignatureDigests for SwappedDigests {
+    fn spend_auth(&self, index: usize) -> Option<[u8; 32]> {
+        PerSignatureDigests.spend_auth(match index {
+            0 => 1,
+            1 => 0,
+            i => i,
+        })
+    }
+
+    fn binding(&self) -> [u8; 32] {
+        PerSignatureDigests.binding()
+    }
+}
+
+/// Signature digests for a single action, too few for a padded bundle.
+struct OneActionDigests;
+
+impl SignatureDigests for OneActionDigests {
+    fn spend_auth(&self, index: usize) -> Option<[u8; 32]> {
+        (index == 0).then(|| PerSignatureDigests.spend_auth(0).unwrap())
+    }
+
+    fn binding(&self) -> [u8; 32] {
+        PerSignatureDigests.binding()
+    }
+}
+
+fn validates(
+    bundle: &Bundle<Authorized, i64>,
+    vk: &VerifyingKey,
+    digests: impl SignatureDigests,
+) -> bool {
+    let mut validator = BatchValidator::new(vk);
+    validator.add_bundle(bundle, digests).unwrap();
+    validator.validate(rng())
+}
+
+/// Asserts that the action at `index` is signed over the digest for its own position, and
+/// not over the digest for any other position.
+fn signed_at_own_position(bundle: &Bundle<Authorized, i64>, index: usize) {
+    let action = &bundle.actions()[index];
+    for position in 0..bundle.actions().len() {
+        let digest = PerSignatureDigests.spend_auth(position).unwrap();
+        assert_eq!(
+            action.rk().verify(&digest, action.authorization()).is_ok(),
+            position == index,
+            "action {index} checked against the digest for position {position}"
+        );
+    }
+}
+
+/// Each signature signs the digest for its own position, both for the dummy spends that
+/// `prepare` signs and for the real spend that `sign` or `append_signatures` adds, and
+/// the batch validator checks each signature against the digest for its position.
+#[test]
+fn per_signature_digests_sign_and_verify() {
+    let mut rng = rng();
+    let keys = cached_test_keys(OrchardCircuitVersion::PostNu6_3);
+    let pk = keys.proving_key();
+    let vk = keys.verifying_key();
+
+    let sk = SpendingKey::from_bytes([0; 32]).unwrap();
+    let ask = SpendAuthorizingKey::from(&sk);
+    let fvk = FullViewingKey::from(&sk);
+    let recipient = fvk.address_at(0u32, Scope::External);
+
+    // Every action of a shielding bundle spends a dummy note, which `prepare` signs.
+    let shielding_bundle: Bundle<_, i64> = {
+        let builder =
+            output_only_builder(BundleVersion::ironwood_v3(), BundleType::DEFAULT, recipient);
+        let (unauthorized, _) = builder.build(&mut rng).unwrap().unwrap();
+        let proven = unauthorized.create_proof(pk, &mut rng).unwrap();
+        proven
+            .apply_signatures(&mut rng, PerSignatureDigests, &[])
+            .unwrap()
+    };
+    for index in 0..shielding_bundle.actions().len() {
+        signed_at_own_position(&shielding_bundle, index);
+    }
+    assert!(validates(&shielding_bundle, vk, PerSignatureDigests));
+    assert!(!validates(&shielding_bundle, vk, [0xbb; 32]));
+    assert!(!validates(&shielding_bundle, vk, SwappedDigests));
+    let mut validator = BatchValidator::new(vk);
+    assert_eq!(
+        validator.add_bundle(&shielding_bundle, OneActionDigests),
+        Err(orchard::bundle::BatchError::MissingSignatureDigest)
+    );
+
+    // A bundle spending a real note, which `sign` or `append_signatures` signs.
+    let ivk = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
+    let (note, _, _) = shielding_bundle
+        .actions()
+        .iter()
+        .find_map(|action| try_note_decryption(&IronwoodDomain::for_action(action), &ivk, action))
+        .unwrap();
+    let (root, merkle_path) = single_leaf_witness(&note.commitment().into());
+    let mut builder = Builder::new(
+        BundleType::DEFAULT,
+        BundleVersion::ironwood_v3(),
+        BundleVersion::ironwood_v3().default_flags(),
+        root.into(),
+    )
+    .unwrap();
+    builder.add_spend(fvk, note, merkle_path).unwrap();
+    builder
+        .add_output(None, recipient, NoteValue::from_raw(5000), [0u8; 512])
+        .unwrap();
+    let (unauthorized, meta) = builder.build(&mut rng).unwrap().unwrap();
+    let real_spend = meta.spend_action_index(0).unwrap();
+    let proven = unauthorized.create_proof(pk, &mut rng).unwrap();
+
+    let signed: Bundle<_, i64> = proven
+        .clone()
+        .apply_signatures(&mut rng, PerSignatureDigests, &[ask])
+        .unwrap();
+    for index in 0..signed.actions().len() {
+        signed_at_own_position(&signed, index);
+    }
+    assert!(validates(&signed, vk, PerSignatureDigests));
+    assert!(!validates(&signed, vk, SwappedDigests));
+
+    // An external signature is accepted at the position whose digest it signs.
+    let external = signed.actions()[real_spend].authorization().clone();
+    let appended: Bundle<_, i64> = proven
+        .clone()
+        .prepare(&mut rng, PerSignatureDigests)
+        .append_signatures(core::slice::from_ref(&external))
+        .unwrap()
+        .finalize()
+        .unwrap();
+    signed_at_own_position(&appended, real_spend);
+    assert!(validates(&appended, vk, PerSignatureDigests));
+    assert!(matches!(
+        proven
+            .prepare(&mut rng, SwappedDigests)
+            .append_signatures(&[external]),
+        Err(orchard::builder::BuildError::InvalidExternalSignature)
+    ));
 }

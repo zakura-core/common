@@ -6,7 +6,7 @@ use core::fmt;
 use rand::{CryptoRng, Rng};
 use tracing::debug;
 
-use super::{Authorized, Bundle};
+use super::{Authorized, Bundle, SignatureDigests};
 use crate::{
     Proof,
     backend::pallas,
@@ -35,7 +35,9 @@ struct QueuedBundle {
     spend_auth_signatures: Vec<redpallas::Signature<SpendAuth>>,
     binding_signature: redpallas::Signature<Binding>,
     value_balance: i64,
-    sighash: [u8; 32],
+    /// The digest each spend authorization signature signs, in Action order.
+    spend_auth_sighashes: Vec<[u8; 32]>,
+    binding_sighash: [u8; 32],
     proof: Proof,
 }
 
@@ -100,8 +102,8 @@ fn normalize(points: &[pallas::Point], bundles: usize) -> Vec<pallas::Affine> {
     affine
 }
 
-/// Error returned by [`BatchValidator::add_bundle`] when a bundle's flags require a circuit
-/// capability the validator's verifying key does not provide.
+/// Error returned by [`BatchValidator::add_bundle`] when it cannot add a bundle to the
+/// batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BatchError {
@@ -111,11 +113,20 @@ pub enum BatchError {
     ///
     /// [`OrchardCircuitVersion::supports_cross_address_restriction`]: crate::circuit::OrchardCircuitVersion::supports_cross_address_restriction
     RestrictionUnsupportedByKey,
+    /// The signature digests describe fewer actions than the bundle has, as when they
+    /// belong to another bundle.
+    MissingSignatureDigest,
 }
 
 impl fmt::Display for BatchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            BatchError::MissingSignatureDigest => {
+                write!(
+                    f,
+                    "the signature digests do not cover every action of the bundle"
+                )
+            }
             BatchError::RestrictionUnsupportedByKey => write!(
                 f,
                 "bundle disables cross-address transfers, but the verifying key's circuit \
@@ -152,19 +163,26 @@ impl<'a> BatchValidator<'a> {
 
     /// Adds the proof and RedPallas signatures from the given bundle to the validator.
     ///
+    /// `sighashes` supplies the digest each signature signs: a `[u8; 32]` for a bundle
+    /// of a v5 or v6 transaction, whose signatures share one digest.
+    ///
     /// Returns [`BatchError::RestrictionUnsupportedByKey`] if the bundle disables cross-address
     /// transfers but the validator's verifying key's circuit version does not support the
     /// cross-address restriction; in that case the bundle is not added to the batch.
     pub fn add_bundle<V: Copy + Into<i64>>(
         &mut self,
         bundle: &Bundle<Authorized, V>,
-        sighash: [u8; 32],
+        sighashes: impl SignatureDigests,
     ) -> Result<(), BatchError> {
         if !bundle.flags().cross_address_enabled() && !self.vk.supports_cross_address_restriction()
         {
             return Err(BatchError::RestrictionUnsupportedByKey);
         }
 
+        let spend_auth_sighashes = (0..bundle.actions().len())
+            .map(|index| sighashes.spend_auth(index))
+            .collect::<Option<Vec<_>>>()
+            .ok_or(BatchError::MissingSignatureDigest)?;
         self.bundles.push(QueuedBundle {
             instances: bundle.to_instances(),
             spend_auth_signatures: bundle
@@ -174,7 +192,8 @@ impl<'a> BatchValidator<'a> {
                 .collect(),
             binding_signature: bundle.authorization().binding_signature().clone(),
             value_balance: (*bundle.value_balance()).into(),
-            sighash,
+            spend_auth_sighashes,
+            binding_sighash: sighashes.binding(),
             proof: bundle.authorization().proof().clone(),
         });
         Ok(())
@@ -230,7 +249,8 @@ impl<'a> BatchValidator<'a> {
                     instances,
                     spend_auth_signatures,
                     binding_signature,
-                    sighash,
+                    spend_auth_sighashes,
+                    binding_sighash,
                     proof,
                     ..
                 } = bundle;
@@ -239,11 +259,14 @@ impl<'a> BatchValidator<'a> {
                     instances
                         .iter()
                         .zip(spend_auth_signatures)
-                        .map(|(instance, sig)| instance.rk().create_batch_item(sig, &sighash)),
+                        .zip(&spend_auth_sighashes)
+                        .map(|((instance, sig), sighash)| {
+                            instance.rk().create_batch_item(sig, sighash)
+                        }),
                 );
                 signatures.push(
                     redpallas::VerificationKey::<Binding>::from_affine(affine[start])
-                        .create_batch_item(binding_signature, &sighash),
+                        .create_batch_item(binding_signature, &binding_sighash),
                 );
 
                 #[cfg(feature = "backend-halo2")]

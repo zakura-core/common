@@ -1863,3 +1863,57 @@ fn typed_decoding_rejects_a_zip_233_delta() {
         envelope.txid(|_| None).unwrap();
     }
 }
+
+#[test]
+fn shielded_sighashes_match_each_signature_digest() {
+    use crate::transaction::sighash::V7ShieldedSighashes;
+    use orchard::bundle::SignatureDigests as _;
+
+    for tv in super::vectors::TEST_VECTORS {
+        let (_, verifying) = verifying_vector(tv);
+        let txid_parts = verifying.digest(TxIdDigester);
+        for (bundle_type, count) in [
+            (
+                ShieldedBundleType::Sapling,
+                verifying
+                    .sapling_bundle()
+                    .map(|b| b.shielded_spends().len()),
+            ),
+            (
+                ShieldedBundleType::Orchard,
+                verifying.orchard_bundle().map(|b| b.actions().len()),
+            ),
+            (
+                ShieldedBundleType::Ironwood,
+                verifying.ironwood_bundle().map(|b| b.actions().len()),
+            ),
+        ] {
+            let sighashes = V7ShieldedSighashes::new(&verifying, bundle_type, &txid_parts);
+            let Some(count) = count else {
+                assert_eq!(sighashes, Err(SighashError::MissingBundle(bundle_type)));
+                continue;
+            };
+            let sighashes = sighashes.unwrap();
+            let single = |signature| {
+                *signature_hash(
+                    &verifying,
+                    &SignableInput::V7Shielded {
+                        bundle_type,
+                        signature,
+                    },
+                    &txid_parts,
+                )
+                .unwrap()
+                .as_ref()
+            };
+            for index in 0..count {
+                assert_eq!(
+                    sighashes.spend_auth(index),
+                    Some(single(ShieldedSignature::SpendAuth { index }))
+                );
+            }
+            assert_eq!(sighashes.binding(), single(ShieldedSignature::Binding));
+            assert_eq!(sighashes.spend_auth(count), None);
+        }
+    }
+}

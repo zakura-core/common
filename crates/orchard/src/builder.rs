@@ -15,7 +15,9 @@ use zcash_note_encryption::ENC_CIPHERTEXT_SIZE;
 use crate::{
     Proof, ProtocolVersion,
     address::Address,
-    bundle::{Authorization, Authorized, Bundle, BundleVersion, Flags, TxVersion},
+    bundle::{
+        Authorization, Authorized, Bundle, BundleVersion, Flags, SignatureDigests, TxVersion,
+    },
     keys::{
         Diversifier, FullViewingKey, OutgoingViewingKey, Scope, SpendAuthorizingKey,
         SpendValidatingKey, SpendingKey,
@@ -1699,7 +1701,8 @@ pub struct SigningMetadata {
 #[derive(Debug)]
 pub struct PartiallyAuthorized {
     binding_signature: redpallas::Signature<Binding>,
-    sighash: [u8; 32],
+    /// The digest each action's spend authorization signature signs, in action order.
+    spend_auth_sighashes: Vec<[u8; 32]>,
 }
 
 impl InProgressSignatures for PartiallyAuthorized {
@@ -1731,31 +1734,49 @@ impl MaybeSigned {
 }
 
 impl<P: fmt::Debug, V> Bundle<InProgress<P, Unauthorized>, V> {
-    /// Loads the sighash into this bundle, preparing it for signing.
+    /// Loads the signature digests into this bundle, preparing it for signing.
     ///
-    /// This API ensures that all signatures are created over the same sighash.
+    /// # Panics
+    ///
+    /// Panics if `sighashes` has no digest for one of the bundle's spend authorization
+    /// signatures, as when it describes another bundle.
+    ///
+    /// `sighashes` supplies the digest each signature signs: a `[u8; 32]` for a bundle
+    /// of a v5 or v6 transaction, whose signatures share one digest.
     pub fn prepare<R: Rng + CryptoRng>(
         self,
         mut rng: R,
-        sighash: [u8; 32],
+        sighashes: impl SignatureDigests,
     ) -> Bundle<InProgress<P, PartiallyAuthorized>, V> {
+        let spend_auth_sighashes: Vec<_> = (0..self.actions().len())
+            .map(|index| {
+                sighashes
+                    .spend_auth(index)
+                    .expect("the caller supplies the signature digests of the bundle it signs")
+            })
+            .collect();
+        // `map_authorization` visits the actions in order, so the counter is each
+        // action's index.
+        let mut context = (&mut rng, 0usize);
         self.map_authorization(
-            &mut rng,
-            |rng, _, SigningMetadata { dummy_ask, parts }| {
+            &mut context,
+            |(rng, index), _, SigningMetadata { dummy_ask, parts }| {
+                let sighash = spend_auth_sighashes[*index];
+                *index += 1;
                 // We can create signatures for dummy spends immediately.
                 dummy_ask
                     .map(|ask| {
                         ask.randomize_with_rk(&parts.alpha, &parts.rk)
-                            .sign(rng, &sighash)
+                            .sign(&mut **rng, &sighash)
                     })
                     .map(MaybeSigned::Signature)
                     .unwrap_or(MaybeSigned::SigningMetadata(parts))
             },
-            |rng, auth| InProgress {
+            |(rng, _), auth| InProgress {
                 proof: auth.proof,
                 sigs: PartiallyAuthorized {
-                    binding_signature: auth.sigs.bsk.sign(rng, &sighash),
-                    sighash,
+                    binding_signature: auth.sigs.bsk.sign(&mut **rng, &sighashes.binding()),
+                    spend_auth_sighashes: spend_auth_sighashes.clone(),
                 },
             },
         )
@@ -1767,15 +1788,20 @@ impl<V> Bundle<InProgress<Proof, Unauthorized>, V> {
     ///
     /// This is a helper method that wraps [`Bundle::prepare`], [`Bundle::sign`], and
     /// [`Bundle::finalize`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `sighashes` has no digest for one of the bundle's spend authorization
+    /// signatures, as [`Bundle::prepare`] does.
     pub fn apply_signatures<R: Rng + CryptoRng>(
         self,
         mut rng: R,
-        sighash: [u8; 32],
+        sighashes: impl SignatureDigests,
         signing_keys: &[SpendAuthorizingKey],
     ) -> Result<Bundle<Authorized, V>, BuildError> {
         signing_keys
             .iter()
-            .fold(self.prepare(&mut rng, sighash), |partial, ask| {
+            .fold(self.prepare(&mut rng, sighashes), |partial, ask| {
                 partial.sign(&mut rng, ask)
             })
             .finalize()
@@ -1788,16 +1814,23 @@ impl<P: fmt::Debug, V> Bundle<InProgress<P, PartiallyAuthorized>, V> {
     /// This will apply signatures for all notes controlled by this spending key.
     pub fn sign<R: Rng + CryptoRng>(self, mut rng: R, ask: &SpendAuthorizingKey) -> Self {
         let expected_ak = ask.into();
+        // `map_authorization` visits the actions in order, so the counter is each
+        // action's index.
+        let mut context = (&mut rng, 0usize);
         self.map_authorization(
-            &mut rng,
-            |rng, partial, maybe| match maybe {
-                MaybeSigned::SigningMetadata(parts) if parts.ak == expected_ak => {
-                    MaybeSigned::Signature(
-                        ask.randomize_with_rk(&parts.alpha, &parts.rk)
-                            .sign(rng, &partial.sigs.sighash),
-                    )
+            &mut context,
+            |(rng, index), partial, maybe| {
+                let sighash = partial.sigs.spend_auth_sighashes[*index];
+                *index += 1;
+                match maybe {
+                    MaybeSigned::SigningMetadata(parts) if parts.ak == expected_ak => {
+                        MaybeSigned::Signature(
+                            ask.randomize_with_rk(&parts.alpha, &parts.rk)
+                                .sign(&mut **rng, &sighash),
+                        )
+                    }
+                    s => s,
                 }
-                s => s,
             },
             |_, partial| partial,
         )
@@ -1820,27 +1853,30 @@ impl<P: fmt::Debug, V> Bundle<InProgress<P, PartiallyAuthorized>, V> {
         self,
         signature: &redpallas::Signature<SpendAuth>,
     ) -> Result<Self, BuildError> {
-        let mut signature_valid_for = 0usize;
+        // `map_authorization` visits the actions in order, so the counter is each
+        // action's index.
+        let mut context = (0usize, 0usize);
         let bundle = self.map_authorization(
-            &mut signature_valid_for,
-            |valid_for, partial, maybe| match maybe {
-                MaybeSigned::SigningMetadata(parts) => {
-                    if parts
-                        .rk
-                        .verify(&partial.sigs.sighash[..], signature)
-                        .is_ok()
-                    {
-                        *valid_for += 1;
-                        MaybeSigned::Signature(signature.clone())
-                    } else {
-                        // Signature isn't for this input.
-                        MaybeSigned::SigningMetadata(parts)
+            &mut context,
+            |(valid_for, index), partial, maybe| {
+                let sighash = partial.sigs.spend_auth_sighashes[*index];
+                *index += 1;
+                match maybe {
+                    MaybeSigned::SigningMetadata(parts) => {
+                        if parts.rk.verify(&sighash[..], signature).is_ok() {
+                            *valid_for += 1;
+                            MaybeSigned::Signature(signature.clone())
+                        } else {
+                            // Signature isn't for this input.
+                            MaybeSigned::SigningMetadata(parts)
+                        }
                     }
+                    s => s,
                 }
-                s => s,
             },
             |_, partial| partial,
         );
+        let (signature_valid_for, _) = context;
         match signature_valid_for {
             0 => Err(BuildError::InvalidExternalSignature),
             1 => Ok(bundle),

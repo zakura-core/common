@@ -9,6 +9,12 @@ use super::SignerError;
 
 impl super::Bundle {
     /// Finalizes the IO for this bundle.
+    ///
+    /// Every signature here signs the one `sighash`, as in transactions before v7. A v7
+    /// transaction ([ZIP 248]) gives each signature its own digest, which these roles do
+    /// not support yet; for such a bundle the signatures it makes do not verify.
+    ///
+    /// [ZIP 248]: https://zips.z.cash/zip-0248
     pub fn finalize_io<R: Rng + CryptoRng>(
         &mut self,
         sighash: [u8; 32],
