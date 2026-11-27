@@ -685,3 +685,89 @@ fn multisig_opcodes_are_refused_even_where_they_never_run() {
     );
 }
 
+
+/// Times the worst block the budget allows against an ordinary full one and the copy attack
+/// it replaces. Run with `cargo test --release --features pq -- --ignored worst_block`.
+#[test]
+#[ignore = "a timing measurement, not a check; run in release"]
+fn worst_block_under_the_budget() {
+    const BLOCK_BYTES: usize = 2_000_000;
+    let key = signing_key(1);
+    let signature = push(&signature_by(&key));
+    let checker = CallbackTransactionSignatureChecker {
+        sighash: &fixed_digest,
+        lock_time: 0,
+        is_final: false,
+    };
+    // Verifies every input, returning the checks they passed or the checks run before
+    // each was refused, and the time taken.
+    let verify_block = |inputs: &[(Vec<u8>, Vec<u8>)], expect_valid: bool| {
+        let start = std::time::Instant::now();
+        for (arguments, body) in inputs {
+            let serialized = input(arguments, body);
+            let parsed = parse_output(&output(body).0).unwrap().unwrap();
+            let result = parsed.verify_spend(NETWORK, &serialized, &checker);
+            assert_eq!(result.is_ok(), expect_valid, "{result:?}");
+        }
+        start.elapsed()
+    };
+    // `checks` CHECKSIGVERIFYs and a final CHECKSIG, each with its own copy of the signature
+    // in the input: the most checks an input can buy, at one signature's bytes apiece.
+    let paid_input = |checks: usize| {
+        let mut body = Vec::new();
+        for index in 0..checks {
+            body.extend(push(&key.public_key()));
+            body.push(if index + 1 == checks { 0xac } else { 0xad });
+        }
+        (signature.repeat(checks), body)
+    };
+
+    // An ordinary full block: one signer per input.
+    let single = paid_input(1);
+    let ordinary: Vec<_> = core::iter::repeat_n(single.clone(), BLOCK_BYTES / input(&single.0, &single.1).len()).collect();
+    let ordinary_time = verify_block(&ordinary, true);
+
+    // The worst the budget allows: inputs as large as allowed, each running every check its
+    // bytes pay for, then one more input for what is left of the block.
+    let per_input = (pq::MAX_INPUT_BYTES - 2_000) / signature.len();
+    let mut worst = Vec::new();
+    let mut used = 0;
+    let mut checks = 0;
+    loop {
+        let remaining = BLOCK_BYTES - used;
+        let count = per_input.min(remaining / (signature.len() + 40 + crypto::PUBLIC_KEY_BYTES));
+        if count == 0 {
+            break;
+        }
+        let entry = paid_input(count);
+        used += input(&entry.0, &entry.1).len();
+        checks += count;
+        worst.push(entry);
+    }
+    assert!(used <= BLOCK_BYTES);
+    assert!(checks <= BLOCK_BYTES / crypto::SIGNATURE_BYTES);
+    let worst_time = verify_block(&worst, true);
+
+    // The copy attack: one signature checked a hundred times per input. Under the budget
+    // each input is refused at its second check.
+    let mut copies = push(&key.public_key());
+    for _ in 0..99 {
+        copies.extend([0x6e, 0xad]); // 2DUP CHECKSIGVERIFY
+    }
+    copies.push(0xac);
+    let copy_entry = (signature.clone(), copies);
+    let attack: Vec<_> = core::iter::repeat_n(copy_entry.clone(), BLOCK_BYTES / input(&copy_entry.0, &copy_entry.1).len()).collect();
+    let attack_time = verify_block(&attack, false);
+
+    let per_check = worst_time / u32::try_from(checks).unwrap();
+    std::eprintln!(
+        "{PARAMETERS:?}: ordinary block {} checks in {ordinary_time:?}; worst block {checks} checks \
+         ({} inputs, {used} bytes) in {worst_time:?}; copy attack {} inputs refused in \
+         {attack_time:?}, which before the budget was {} checks, about {:?} at {per_check:?} each",
+        ordinary.len(),
+        worst.len(),
+        attack.len(),
+        attack.len() * 100,
+        per_check * u32::try_from(attack.len() * 100).unwrap(),
+    );
+}
