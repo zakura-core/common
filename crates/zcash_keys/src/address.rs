@@ -22,12 +22,13 @@ pub struct UnifiedAddress {
     #[cfg(feature = "sapling")]
     sapling: Option<PaymentAddress>,
     transparent: Option<TransparentAddress>,
-    /// A post-quantum transparent receiver: its scheme and the commitment an output carries.
+    /// Post-quantum transparent receivers: each one's scheme and the commitment an output
+    /// carries. At most one per scheme, most preferred first.
     ///
-    /// This is not derived from a viewing key the way the others are, because a hash-based
+    /// These are not derived from a viewing key the way the others are, because a hash-based
     /// public key cannot be computed without the secret that generates it. A caller holding a
     /// commitment from its key pool attaches one with [`UnifiedAddress::with_pq_transparent_receiver`].
-    pq_transparent: Option<(PqScheme, [u8; 32])>,
+    pq_transparent: Vec<(PqScheme, [u8; 32])>,
     unknown: Vec<(u32, Vec<u8>)>,
 }
 
@@ -40,7 +41,7 @@ impl TryFrom<unified::Address> for UnifiedAddress {
         #[cfg(feature = "sapling")]
         let mut sapling = None;
         let mut transparent = None;
-        let mut pq_transparent = None;
+        let mut pq_transparent = vec![];
 
         let mut unknown: Vec<(u32, Vec<u8>)> = vec![];
 
@@ -85,7 +86,9 @@ impl TryFrom<unified::Address> for UnifiedAddress {
                 }
 
                 unified::Receiver::PqTransparent { scheme, commitment } => {
-                    pq_transparent = Some((*scheme, *commitment));
+                    // The decoder has already refused a repeated typecode, so this holds
+                    // at most one receiver per scheme.
+                    pq_transparent.push((*scheme, *commitment));
                 }
 
                 unified::Receiver::Unknown { typecode, data } => {
@@ -93,6 +96,8 @@ impl TryFrom<unified::Address> for UnifiedAddress {
                 }
             }
         }
+
+        sort_pq_receivers(&mut pq_transparent);
 
         Ok(Self {
             #[cfg(feature = "orchard")]
@@ -104,6 +109,13 @@ impl TryFrom<unified::Address> for UnifiedAddress {
             unknown,
         })
     }
+}
+
+/// Orders post-quantum receivers the way a sender ranks them, most preferred first.
+fn sort_pq_receivers(receivers: &mut [(PqScheme, [u8; 32])]) {
+    receivers.sort_unstable_by(|(a, _), (b, _)| {
+        Typecode::preference_order(&Typecode::PqTransparent(*a), &Typecode::PqTransparent(*b))
+    });
 }
 
 impl UnifiedAddress {
@@ -134,7 +146,7 @@ impl UnifiedAddress {
                 #[cfg(feature = "sapling")]
                 sapling,
                 transparent,
-                pq_transparent: None,
+                pq_transparent: vec![],
                 unknown: vec![],
             })
         } else {
@@ -186,18 +198,29 @@ impl UnifiedAddress {
 
     /// Returns whether this address has a post-quantum transparent receiver.
     pub fn has_pq_transparent(&self) -> bool {
-        self.pq_transparent.is_some()
+        !self.pq_transparent.is_empty()
     }
 
-    /// Returns this address's post-quantum transparent receiver, if it has one.
+    /// Returns this address's most preferred post-quantum transparent receiver, if it has
+    /// one. This is the one a sender that understands every scheme pays.
     pub fn pq_transparent(&self) -> Option<(PqScheme, &[u8; 32])> {
         self.pq_transparent
-            .as_ref()
+            .first()
             .map(|(scheme, commitment)| (*scheme, commitment))
     }
 
-    /// Returns this address with a post-quantum transparent receiver attached, replacing any
-    /// the address already carried.
+    /// Returns every post-quantum transparent receiver this address carries, most preferred
+    /// first, at most one per scheme.
+    ///
+    /// An address normally carries one. It carries two while a wallet rolls out a newer
+    /// scheme, so that senders that know only the older one still pay a post-quantum
+    /// receiver; dropping either would change what those senders pay.
+    pub fn pq_transparent_receivers(&self) -> &[(PqScheme, [u8; 32])] {
+        &self.pq_transparent
+    }
+
+    /// Returns this address with a post-quantum transparent receiver attached, replacing a
+    /// receiver of the same scheme if the address already carried one.
     ///
     /// This is a separate step rather than an argument to [`Self::from_receivers`] because a PQ
     /// receiver is not derivable: there is no extended public key for a hash-based signature
@@ -206,11 +229,15 @@ impl UnifiedAddress {
     /// one it can still spend: an address offering a receiver nobody can sign for is a way to
     /// lose money.
     ///
-    /// A wallet attaches at most one, for the parameter set its account holds. The encoding can
-    /// carry one receiver per scheme, but offering two would let the sender decide which signing
-    /// key has to be present when the funds are spent.
+    /// A wallet normally attaches one, for the parameter set its account holds: offering two
+    /// lets the sender decide which signing key has to be present when the funds are spent.
+    /// The exception is rolling out a newer scheme, when a wallet that can sign for both
+    /// attaches the newer one beside the older.
     pub fn with_pq_transparent_receiver(mut self, scheme: PqScheme, commitment: [u8; 32]) -> Self {
-        self.pq_transparent = Some((scheme, commitment));
+        self.pq_transparent
+            .retain(|(existing, _)| *existing != scheme);
+        self.pq_transparent.push((scheme, commitment));
+        sort_pq_receivers(&mut self.pq_transparent);
         self
     }
 
@@ -251,7 +278,7 @@ impl UnifiedAddress {
         }));
 
         let items =
-            items.chain(self.pq_transparent.map(|(scheme, commitment)| {
+            items.chain(self.pq_transparent.iter().map(|&(scheme, commitment)| {
                 unified::Receiver::PqTransparent { scheme, commitment }
             }));
 
@@ -278,7 +305,8 @@ impl UnifiedAddress {
         }));
         let result = result.chain(
             self.pq_transparent
-                .map(|(scheme, _)| Typecode::PqTransparent(scheme)),
+                .iter()
+                .map(|&(scheme, _)| Typecode::PqTransparent(scheme)),
         );
         let result = result.chain(
             self.unknown()
@@ -689,7 +717,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "orchard")]
-    fn attaching_a_pq_transparent_receiver_replaces_the_previous_one() {
+    fn attaching_a_pq_transparent_receiver_replaces_only_its_own_scheme() {
         use zcash_address::unified::PqScheme;
 
         use super::UnifiedAddress;
@@ -709,11 +737,71 @@ mod tests {
             .expect("an Orchard receiver is a shielded receiver");
         assert!(!ua.has_pq_transparent());
 
+        // A second receiver of the same scheme replaces the first.
         let ua = ua
             .with_pq_transparent_receiver(PqScheme::Sha2_128f, [1; 32])
-            .with_pq_transparent_receiver(PqScheme::Sha2_192s, [2; 32]);
+            .with_pq_transparent_receiver(PqScheme::Sha2_128f, [3; 32]);
+        assert_eq!(
+            ua.pq_transparent_receivers(),
+            &[(PqScheme::Sha2_128f, [3; 32])]
+        );
+
+        // A receiver of the other scheme is added beside it, and the preferred one leads
+        // whichever order they were attached in.
+        let ua = ua.with_pq_transparent_receiver(PqScheme::Sha2_192s, [2; 32]);
         assert_eq!(ua.pq_transparent(), Some((PqScheme::Sha2_192s, &[2; 32])));
-        assert_eq!(ua.receiver_types().len(), 2);
+        assert_eq!(
+            ua.pq_transparent_receivers(),
+            &[
+                (PqScheme::Sha2_192s, [2; 32]),
+                (PqScheme::Sha2_128f, [3; 32])
+            ]
+        );
+        assert_eq!(ua.receiver_types().len(), 3);
+    }
+
+    #[test]
+    #[cfg(feature = "orchard")]
+    fn an_address_carrying_both_pq_schemes_round_trips() {
+        use zcash_address::unified::{self, Encoding, PqScheme};
+
+        use super::UnifiedAddress;
+
+        let orchard = test_vectors::UNIFIED
+            .iter()
+            .find_map(|tv| tv.orchard_raw_addr)
+            .expect("a test vector carries an Orchard receiver");
+
+        // Both schemes at once, as during the rollout of a newer one.
+        let parsed = unified::Address::try_from_items(vec![
+            unified::Receiver::Orchard(orchard),
+            unified::Receiver::PqTransparent {
+                scheme: PqScheme::Sha2_128f,
+                commitment: [1; 32],
+            },
+            unified::Receiver::PqTransparent {
+                scheme: PqScheme::Sha2_192s,
+                commitment: [2; 32],
+            },
+        ])
+        .expect("one receiver of each PQ scheme is well formed");
+        let ua = UnifiedAddress::try_from(parsed.clone()).expect("the receivers are valid");
+
+        // Neither receiver is dropped, and a sender is offered the preferred one.
+        assert_eq!(
+            ua.pq_transparent_receivers(),
+            &[
+                (PqScheme::Sha2_192s, [2; 32]),
+                (PqScheme::Sha2_128f, [1; 32])
+            ]
+        );
+        assert_eq!(ua.pq_transparent(), Some((PqScheme::Sha2_192s, &[2; 32])));
+
+        let encoded = ua.encode(&MAIN_NETWORK);
+        let reparsed = unified::Address::decode(&encoded)
+            .map(|(_, address)| address)
+            .expect("the rendered address decodes");
+        assert_eq!(reparsed, parsed);
     }
 
     #[test]
