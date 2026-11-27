@@ -5,7 +5,7 @@ use core::num::NonZeroI64;
 
 use proptest::prelude::*;
 
-use super::{
+use super::super::{
     BundleData, BundleId, BundleType, BundleVariant, Envelope, EnvelopeError, Header, MapKind,
     ValuePoolDelta,
 };
@@ -66,19 +66,23 @@ fn encoding_matches_vector() {
 
 #[test]
 fn digests_match_vector() {
-    // The vector supplies opaque per-bundle digests, as a wallet would for bundles it
-    // does not understand.
+    // The vector supplies opaque per-bundle digests, to check how the envelope combines
+    // them whatever the payloads are.
     let envelope = vector_envelope();
-    let txid = envelope.txid(|_| Ok::<_, Infallible>([0x11; 32])).unwrap();
+    let txid = envelope
+        .txid_with_bundle_digests(|_| Ok::<_, Infallible>([0x11; 32]))
+        .unwrap();
     assert_eq!(hex::encode(txid.as_ref()), VECTOR_TXID);
     let auth = envelope
-        .auth_digest(|_| Ok::<_, Infallible>([0x22; 32]))
+        .auth_digest_with_bundle_digests(|_| Ok::<_, Infallible>([0x22; 32]))
         .unwrap();
     assert_eq!(hex::encode(auth.as_bytes()), VECTOR_AUTH_DIGEST);
 
     let empty = Envelope::new(header(), vec![], vec![], vec![]).unwrap();
     let txid = empty
-        .txid(|_| -> Result<[u8; 32], Infallible> { unreachable!("no bundles") })
+        .txid_with_bundle_digests(|_| -> Result<[u8; 32], Infallible> {
+            unreachable!("no bundles")
+        })
         .unwrap();
     assert_eq!(hex::encode(txid.as_ref()), EMPTY_TXID);
 }
@@ -98,7 +102,7 @@ fn multi_byte_identifiers_match_vector() {
     assert_eq!(Envelope::read(&encoded[..]).unwrap(), envelope);
 
     let txid = envelope
-        .txid(|b| {
+        .txid_with_bundle_digests(|b| {
             Ok::<_, Infallible>(if b.bundle.bundle_type == BundleType::SAPLING {
                 [0x33; 32]
             } else {
@@ -108,7 +112,7 @@ fn multi_byte_identifiers_match_vector() {
         .unwrap();
     assert_eq!(hex::encode(txid.as_ref()), MULTI_TXID);
     let auth = envelope
-        .auth_digest(|_| Ok::<_, Infallible>([0x55; 32]))
+        .auth_digest_with_bundle_digests(|_| Ok::<_, Infallible>([0x55; 32]))
         .unwrap();
     assert_eq!(hex::encode(auth.as_bytes()), MULTI_AUTH_DIGEST);
 }
@@ -285,6 +289,20 @@ fn unregistered_bundles_parse_opaquely() {
     let mut encoded = vec![];
     envelope.write(&mut encoded).unwrap();
     assert_eq!(Envelope::read(&encoded[..]).unwrap(), envelope);
+
+    // Its digests need only the supplied digests of its bundles.
+    assert_eq!(
+        envelope.txid(|_| Some([0x11; 32])).unwrap(),
+        envelope
+            .txid_with_bundle_digests(|_| Ok::<_, Infallible>([0x11; 32]))
+            .unwrap()
+    );
+    assert_eq!(
+        envelope.auth_digest(|_| Some([0x22; 32])).unwrap(),
+        envelope
+            .auth_digest_with_bundle_digests(|_| Ok::<_, Infallible>([0x22; 32]))
+            .unwrap()
+    );
 }
 
 #[test]
@@ -310,6 +328,103 @@ fn coinbase_is_identified_by_any_coinbase_variant() {
     let coinbase = Envelope::new(header(), vec![], vec![data(1, 3, &[])], vec![]).unwrap();
     assert!(coinbase.is_coinbase());
     assert!(!vector_envelope().is_coinbase());
+}
+
+/// Applies the edit that `scenario` names to the envelope of a frozen typed vector.
+fn edit_for_scenario(scenario: &str, envelope: Envelope) -> Envelope {
+    fn auth(auths: &mut [BundleData], bundle_type: BundleType) -> &mut Vec<u8> {
+        &mut auths
+            .iter_mut()
+            .find(|a| a.bundle.bundle_type == bundle_type)
+            .unwrap()
+            .data
+    }
+    let (mut header, deltas, effects, mut auths) = envelope.into_parts();
+    match scenario {
+        "Sapling effects without authorizing data" => {
+            auths.retain(|a| a.bundle.bundle_type != BundleType::SAPLING)
+        }
+        "transparent inputs and Ironwood without authorizing data" => auths.clear(),
+        // The first input's sighashInfo becomes [0x01, 0x01].
+        "transparent input with sighash variant 1" => {
+            auth(&mut auths, BundleType::TRANSPARENT)[1] = 1
+        }
+        // After the anchor and the proof of two actions, with its three-byte length.
+        "Ironwood action with sighash variant 2" => {
+            auth(&mut auths, BundleType::IRONWOOD)[32 + 3 + 2720 + 2 * 2272 + 1] = 2
+        }
+        // After the anchor, two spend proofs and two spend authorization signatures.
+        "Sapling binding signature with associated data" => {
+            let payload = auth(&mut auths, BundleType::SAPLING);
+            let at = 32 + 2 * 192 + 2 * 66;
+            payload[at] = 2;
+            payload.insert(at + 2, 0xaa);
+        }
+        "unknown consensus branch ID" => header.consensus_branch_id = 0x7a6b_5c4d,
+        _ => panic!("unknown scenario {scenario}"),
+    }
+    Envelope::new(header, deltas, effects, auths).unwrap()
+}
+
+/// The digests of an envelope that the typed layer rejects, for a reason that leaves
+/// them defined, match the independent oracle.
+#[test]
+fn envelope_digests_match_the_oracle_where_typed_decoding_fails() {
+    use super::{envelope_vectors::ENVELOPE_VECTORS, vectors::TEST_VECTORS};
+    use crate::transaction::Transaction;
+    use zcash_protocol::consensus::BranchId;
+
+    assert_eq!(ENVELOPE_VECTORS.len(), 6);
+    for ev in ENVELOPE_VECTORS {
+        let base = &TEST_VECTORS[ev.base];
+        let envelope = edit_for_scenario(
+            ev.scenario,
+            Envelope::read(&hex::decode(base.tx).unwrap()[..]).unwrap(),
+        );
+        let mut encoded = vec![];
+        envelope.write(&mut encoded).unwrap();
+        assert_eq!(hex::encode(&encoded), ev.tx, "{}", ev.scenario);
+        assert!(
+            Transaction::read(&encoded[..], BranchId::Nu7_1).is_err(),
+            "{}",
+            ev.scenario
+        );
+
+        let txid = envelope.txid(|_| None).unwrap();
+        assert_eq!(hex::encode(txid.as_ref()), ev.txid, "{}", ev.scenario);
+        let auth = envelope.auth_digest(|_| None).unwrap();
+        assert_eq!(
+            hex::encode(auth.as_bytes()),
+            ev.auth_digest,
+            "{}",
+            ev.scenario
+        );
+        // The identifier commits to effecting data only, which only the branch edit
+        // changes.
+        if ev.scenario != "unknown consensus branch ID" {
+            assert_eq!(ev.txid, base.txid, "{}", ev.scenario);
+        }
+    }
+}
+
+/// A registered pair in a map the registry gives it no encoding in has no digest the
+/// envelope can compute, so the caller supplies it, as for an unregistered pair.
+#[test]
+fn registered_pairs_outside_their_maps_take_supplied_digests() {
+    let fee = data(5, 0, &[1]);
+    let envelope = Envelope::new(header(), vec![], vec![fee.clone()], vec![]).unwrap();
+    assert_matches::assert_matches!(
+        envelope.txid(|_| None),
+        Err(super::super::DigestError::MissingDigest(BundleId::FEE))
+    );
+    assert_eq!(
+        envelope
+            .txid(|id| (id == BundleId::FEE).then_some([0x33; 32]))
+            .unwrap(),
+        envelope
+            .txid_with_bundle_digests(|_| Ok::<_, Infallible>([0x33; 32]))
+            .unwrap()
+    );
 }
 
 fn arb_bundle_id(bundle_type: u32) -> impl Strategy<Value = BundleId> {

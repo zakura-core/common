@@ -7,7 +7,11 @@ use crate::transaction::{
     sighash_v5::transparent_sig_digest, txid::to_hash_v6,
 };
 
-pub fn v6_signature_hash<
+/// Computes the signature digest of a v6 transaction.
+///
+/// [`signature_hash`](super::sighash::signature_hash) is the public entry point; it
+/// rejects the signers of other transaction versions before calling this.
+pub(crate) fn v6_signature_hash<
     TA: TransparentAuthorizingContext,
     A: Authorization<TransparentAuth = TA>,
 >(

@@ -202,8 +202,18 @@ impl Block {
         // Parse with an arbitrary consensus branch ID initially; we will fix it later.
         let coinbase = Transaction::read(&mut reader, consensus::BranchId::Sprout)?;
 
-        // Extract the claimed block height from the coinbase transaction.
-        let claimed_height = {
+        // Extract the claimed block height from the coinbase transaction. A v7 coinbase
+        // states it in its coinbase bundle; earlier ones push it in the coinbase input.
+        let claimed_height = if let Some(coinbase_bundle) = coinbase.coinbase_bundle() {
+            coinbase_bundle.block_height()
+        } else if coinbase.version() == TxVersion::V7 {
+            // A v7 transaction is a coinbase transaction only if it has a coinbase bundle,
+            // whatever its transparent inputs look like.
+            return Err(corez::io::Error::new(
+                ErrorKind::Other,
+                "first tx of block is not coinbase",
+            ));
+        } else {
             let coinbase_transparent = coinbase
                 .transparent_bundle()
                 .filter(|b| b.is_coinbase())
@@ -273,6 +283,12 @@ impl Block {
         })?;
 
         // Verify some simple structural consensus rules on the non-coinbase transactions.
+        if non_coinbase.iter().any(|tx| tx.coinbase_bundle().is_some()) {
+            return Err(corez::io::Error::new(
+                ErrorKind::Other,
+                "non-coinbase tx has a coinbase bundle",
+            ));
+        }
         if non_coinbase
             .iter()
             .flat_map(|tx| tx.transparent_bundle())
@@ -483,6 +499,90 @@ mod tests {
         let mut encoded = Vec::with_capacity(header_mainnet_415000.len());
         header.write(&mut encoded).unwrap();
         assert_eq!(header_mainnet_415000, &encoded[..]);
+    }
+
+    /// A block whose coinbase is a v7 transaction states its height in the coinbase
+    /// bundle, and no other transaction may have one.
+    #[test]
+    fn block_read_finds_v7_coinbase_height() {
+        use crate::transaction::{Transaction, v7::tests::vectors::TEST_VECTORS};
+        use zcash_protocol::{
+            consensus::{BlockHeight, BranchId},
+            local_consensus::LocalNetwork,
+        };
+
+        let at_genesis = Some(BlockHeight::from_u32(1));
+        let network = LocalNetwork {
+            overwinter: at_genesis,
+            sapling: at_genesis,
+            blossom: at_genesis,
+            heartwood: at_genesis,
+            canopy: at_genesis,
+            nu5: at_genesis,
+            nu6: at_genesis,
+            nu6_1: at_genesis,
+            nu6_2: at_genesis,
+            nu6_3: at_genesis,
+            nu7: at_genesis,
+            nu7_1: at_genesis,
+        };
+        let coinbase = TEST_VECTORS
+            .iter()
+            .map(|tv| hex::decode(tv.tx.as_bytes()).unwrap())
+            .find(|tx| {
+                Transaction::read(&tx[..], BranchId::Nu7_1)
+                    .unwrap()
+                    .is_coinbase()
+            })
+            .expect("the vectors include a coinbase transaction");
+        let height = Transaction::read(&coinbase[..], BranchId::Nu7_1)
+            .unwrap()
+            .coinbase_bundle()
+            .expect("a v7 coinbase transaction has a coinbase bundle")
+            .block_height();
+
+        let mut block = BLOCK_MAINNET_415000[..1487].to_vec();
+        block.push(1);
+        block.extend_from_slice(&coinbase);
+        assert_eq!(
+            Block::read(&block[..], &network).unwrap().claimed_height(),
+            height
+        );
+
+        let mut block = BLOCK_MAINNET_415000[..1487].to_vec();
+        block.push(2);
+        block.extend_from_slice(&coinbase);
+        block.extend_from_slice(&coinbase);
+        assert!(Block::read(&block[..], &network).is_err());
+
+        // A v7 transaction without a coinbase bundle is not a coinbase transaction, even
+        // if its only input has a null previous output and a scriptSig that pushes a
+        // height.
+        let lookalike = crate::transaction::TransactionData::from_parts_v7(
+            BranchId::Nu7_1,
+            0,
+            height,
+            Some(::transparent::bundle::Bundle {
+                vin: alloc::vec![::transparent::bundle::TxIn::from_parts(
+                    ::transparent::bundle::OutPoint::NULL,
+                    ::transparent::address::Script(zcash_script::script::Code(alloc::vec![0x55])),
+                    0xffff_ffff,
+                )],
+                vout: alloc::vec![],
+                authorization: ::transparent::bundle::Authorized,
+            }),
+            None,
+            None,
+            None,
+            Default::default(),
+        )
+        .unwrap()
+        .freeze()
+        .unwrap();
+        let mut block = BLOCK_MAINNET_415000[..1487].to_vec();
+        block.push(1);
+        lookalike.write(&mut block).unwrap();
+        assert!(Block::read(&block[..], &network).is_err());
     }
 
     #[test]

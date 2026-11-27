@@ -935,7 +935,8 @@ impl<P, U> Builder<P, U> {
     /// Checks that the given version supports all features required by the inputs and
     /// outputs already added to the builder.
     fn check_version_compatibility<FE>(&self, version: TxVersion) -> Result<(), Error<FE>> {
-        if !version.valid_in_branch(self.consensus_branch_id) {
+        // The builder does not construct v7 transactions yet.
+        if version == TxVersion::V7 || !version.valid_in_branch(self.consensus_branch_id) {
             return Err(Error::TargetIncompatible(
                 self.consensus_branch_id,
                 version,
@@ -1694,6 +1695,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             sapling_bundle,
             orchard_bundle,
             ironwood_bundle,
+            v7: None,
         };
 
         //
@@ -1712,7 +1714,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         // V4 transactions are deprecated this should just be the txid, but
         // for now we need to continue to compute it here.
         let shielded_sig_commitment =
-            signature_hash(&unauthed_tx, &SignableInput::Shielded, &txid_parts);
+            signature_hash(&unauthed_tx, &SignableInput::Shielded, &txid_parts)
+                .expect("the builder makes only pre-v7 transactions, whose shielded signatures share one digest");
 
         #[cfg(feature = "wallet")]
         let sapling_asks = sapling_extsks
@@ -1809,6 +1812,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             sapling_bundle,
             orchard_bundle,
             ironwood_bundle,
+            v7: None,
         };
 
         // The unwrap() here is safe because the txid hashing
@@ -1950,7 +1954,9 @@ fn authorize_transparent(
 {
     b.clone().apply_signatures(
         |input| {
-            *signature_hash(unauthed_tx, &SignableInput::Transparent(input), txid_parts).as_ref()
+            *signature_hash(unauthed_tx, &SignableInput::Transparent(input), txid_parts)
+                .expect("the builder makes only pre-v7 transactions, whose transparent signatures cannot fail")
+                .as_ref()
         },
         transparent_signing_set,
     )

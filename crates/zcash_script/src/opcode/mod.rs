@@ -615,6 +615,25 @@ impl Operation {
         Ok(false)
     }
 
+    /// Under [`interpreter::Flags::SigHashAllOnly`], rejects a nonempty signature whose
+    /// hash type byte is not `SIGHASH_ALL`. An empty signature is a deliberate failure and
+    /// carries no hash type.
+    fn check_sighash_all_only(
+        vch_sig: &[u8],
+        flags: interpreter::Flags,
+    ) -> Result<(), interpreter::Error> {
+        const SIGHASH_ALL: u8 = 0x01;
+        match vch_sig.last() {
+            Some(&hash_type)
+                if flags.contains(interpreter::Flags::SigHashAllOnly)
+                    && hash_type != SIGHASH_ALL =>
+            {
+                Err(interpreter::Error::SigHashNotAll)
+            }
+            _ => Ok(()),
+        }
+    }
+
     fn cast_from_bool(b: bool) -> Vec<u8> {
         static VCH_FALSE: [u8; 0] = [];
         static VCH_TRUE: [u8; 1] = [1];
@@ -957,6 +976,7 @@ impl Operation {
             Self::OP_CHECKSIG | Self::OP_CHECKSIGVERIFY => {
                 let vch_pub_key = state.stack.pop()?;
                 let vch_sig = state.stack.pop()?;
+                Self::check_sighash_all_only(&vch_sig, flags)?;
 
                 Self::is_sig_valid(&vch_sig, &vch_pub_key, flags, script, checker).and_then(
                     |success| {
@@ -1004,6 +1024,12 @@ impl Operation {
                 let mut isig = i;
                 i += sigs_count;
                 state.stack.check_len(usize::from(i) + 1)?;
+
+                // Every supplied signature counts, including those the loop below stops
+                // before reaching.
+                for sig in isig..i {
+                    Self::check_sighash_all_only(state.stack.rget(usize::from(sig))?, flags)?;
+                }
 
                 let mut success = true;
                 while success && sigs_count > 0 {

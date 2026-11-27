@@ -78,6 +78,11 @@ pub enum Error {
     #[error("discouraged upgradable NOP encountered")]
     DiscourageUpgradableNOPs,
 
+    /// A nonempty signature without the `SIGHASH_ALL` hash type, under
+    /// [`Flags::SigHashAllOnly`].
+    #[error("signature hash type is not SIGHASH_ALL")]
+    SigHashNotAll,
+
     // extensions (these don’t exist in C++, and thus map to `UnknownError`)
     /// Corresponds to the `scriptnum_error` exception in C++.
     #[error("script number error: {0}")]
@@ -178,6 +183,14 @@ bitflags::bitflags! {
         ///
         /// See [BIP65](https://github.com/bitcoin/bips/blob/master/bip-0065.mediawiki) for details.
         const CHECKLOCKTIMEVERIFY = 1 << 9;
+
+        /// Require the `SIGHASH_ALL` hash type for every nonempty signature passed to a
+        /// checksig operation, whether or not the operation goes on to check it.
+        ///
+        /// This is the consensus rule for transparent inputs of a v7 transaction signed with
+        /// sighash variant 0 ([ZIP 248](https://zips.z.cash/zip-0248)): the variant 0 digest
+        /// does not depend on the hash type, so any other hash type would be malleable.
+        const SigHashAllOnly = 1 << 10;
     }
 }
 
@@ -498,5 +511,211 @@ impl SignatureChecker for CallbackTransactionSignatureChecker<'_> {
         } else {
             !self.is_final
         }
+    }
+}
+
+#[cfg(test)]
+mod sighash_all_only_tests {
+    use alloc::vec::Vec;
+
+    use super::{Error, Flags, NullSignatureChecker};
+    use crate::script::{self, Code};
+
+    const OP_0: u8 = 0x00;
+    const OP_1: u8 = 0x51;
+    const OP_2: u8 = 0x52;
+    const OP_IF: u8 = 0x63;
+    const OP_ENDIF: u8 = 0x68;
+    const OP_EQUAL: u8 = 0x87;
+    const OP_NOT: u8 = 0x91;
+    const OP_HASH160: u8 = 0xa9;
+    const OP_CHECKSIG: u8 = 0xac;
+    const OP_CHECKSIGVERIFY: u8 = 0xad;
+    const OP_CHECKMULTISIG: u8 = 0xae;
+    const OP_CHECKMULTISIGVERIFY: u8 = 0xaf;
+
+    /// A push of a well-formed DER signature with `hash_type`, which the null checker
+    /// rejects.
+    fn sig(hash_type: u8) -> Vec<u8> {
+        let mut der = const_hex::decode(
+            "304502207fa7a6d1e0ee81132a269ad84e68d695483745cde8b541e3bf630749894e342a022100c1f7ab20e13e22fb95281a870f3dcf38d782e53023ee313d741ad0cfbc0c5090",
+        )
+        .unwrap();
+        der.push(hash_type);
+        let mut push = alloc::vec![u8::try_from(der.len()).unwrap()];
+        push.extend_from_slice(&der);
+        push
+    }
+
+    fn eval(sig: Vec<u8>, pub_key: Vec<u8>, flags: Flags) -> Result<bool, script::Error> {
+        script::Raw::from_raw_parts(sig, pub_key)
+            .eval(flags, &NullSignatureChecker())
+            .map_err(|(_, e)| e)
+    }
+
+    fn is_not_all(result: Result<bool, script::Error>) -> bool {
+        matches!(
+            result,
+            Err(script::Error::Interpreter(_, Error::SigHashNotAll))
+        )
+    }
+
+    fn is_verify_failure(result: Result<bool, script::Error>) -> bool {
+        matches!(result, Err(script::Error::Interpreter(_, Error::Verify)))
+    }
+
+    /// A push of `data`, which must be shorter than `OP_PUSHDATA1` needs.
+    fn push(data: &[u8]) -> Vec<u8> {
+        [&[u8::try_from(data.len()).unwrap()][..], data].concat()
+    }
+
+    /// `<sig> <bad pubkey> CHECKSIG NOT` succeeds because the check fails; the hash type
+    /// rule applies anyway, since the signature was supplied to `CHECKSIG`.
+    #[test]
+    fn checksig_rejects_other_hash_types_even_when_unchecked() {
+        let pub_key = alloc::vec![1, 0x00, OP_CHECKSIG, OP_NOT];
+        for hash_type in [0x02, 0x03, 0x81, 0x00] {
+            assert_eq!(
+                eval(sig(hash_type), pub_key.clone(), Flags::empty()),
+                Ok(true)
+            );
+            assert!(is_not_all(eval(
+                sig(hash_type),
+                pub_key.clone(),
+                Flags::SigHashAllOnly
+            )));
+        }
+        assert_eq!(
+            eval(sig(0x01), pub_key.clone(), Flags::SigHashAllOnly),
+            Ok(true)
+        );
+        // An empty signature carries no hash type.
+        assert_eq!(
+            eval(alloc::vec![OP_0], pub_key, Flags::SigHashAllOnly),
+            Ok(true)
+        );
+    }
+
+    /// In a 2-of-2 `CHECKMULTISIG` whose first check fails, the second signature is never
+    /// checked, but it was still supplied.
+    #[test]
+    fn checkmultisig_checks_every_supplied_signature() {
+        let pub_key = alloc::vec![OP_2, 1, 0x00, 1, 0x00, OP_2, OP_CHECKMULTISIG, OP_NOT];
+        let sigs = |second: u8| [alloc::vec![OP_0], sig(0x01), sig(second)].concat();
+        assert_eq!(eval(sigs(0x81), pub_key.clone(), Flags::empty()), Ok(true));
+        assert!(is_not_all(eval(
+            sigs(0x81),
+            pub_key.clone(),
+            Flags::SigHashAllOnly
+        )));
+        assert_eq!(eval(sigs(0x01), pub_key, Flags::SigHashAllOnly), Ok(true));
+    }
+
+    /// `CHECKSIGVERIFY` applies the rule before it verifies, so a signature with another
+    /// hash type fails with `SigHashNotAll` rather than with the failed verification.
+    #[test]
+    fn checksigverify_rejects_other_hash_types() {
+        let pub_key = alloc::vec![1, 0x00, OP_CHECKSIGVERIFY, OP_1];
+        assert!(is_verify_failure(eval(
+            sig(0x81),
+            pub_key.clone(),
+            Flags::empty()
+        )));
+        assert!(is_not_all(eval(
+            sig(0x81),
+            pub_key.clone(),
+            Flags::SigHashAllOnly
+        )));
+        assert!(is_verify_failure(eval(
+            sig(0x01),
+            pub_key,
+            Flags::SigHashAllOnly
+        )));
+    }
+
+    #[test]
+    fn checkmultisigverify_rejects_other_hash_types() {
+        let pub_key = alloc::vec![OP_1, 1, 0x00, OP_1, OP_CHECKMULTISIGVERIFY, OP_1];
+        let sigs = |hash_type: u8| [alloc::vec![OP_0], sig(hash_type)].concat();
+        assert!(is_verify_failure(eval(
+            sigs(0x82),
+            pub_key.clone(),
+            Flags::empty()
+        )));
+        assert!(is_not_all(eval(
+            sigs(0x82),
+            pub_key.clone(),
+            Flags::SigHashAllOnly
+        )));
+        assert!(is_verify_failure(eval(
+            sigs(0x01),
+            pub_key,
+            Flags::SigHashAllOnly
+        )));
+    }
+
+    /// The `CHECKMULTISIG` dummy element is not a signature, so its last byte is not a
+    /// hash type.
+    #[test]
+    fn checkmultisig_does_not_check_the_dummy_element() {
+        let pub_key = alloc::vec![OP_1, 1, 0x00, OP_1, OP_CHECKMULTISIG, OP_NOT];
+        let sigs = [sig(0x81), alloc::vec![OP_0]].concat();
+        assert_eq!(eval(sigs, pub_key, Flags::SigHashAllOnly), Ok(true));
+    }
+
+    /// The rule applies to the signatures checked by a P2SH redeem script, which only runs
+    /// under `P2SH`.
+    #[test]
+    fn p2sh_redeem_script_signatures_are_checked() {
+        use ripemd::{Digest, Ripemd160};
+        use sha2::Sha256;
+
+        let redeem = alloc::vec![1, 0x00, OP_CHECKSIG, OP_NOT];
+        let script_sig = [sig(0x81), push(&redeem)].concat();
+        let pub_key = [
+            &[OP_HASH160][..],
+            &push(&Ripemd160::digest(Sha256::digest(&redeem))),
+            &[OP_EQUAL],
+        ]
+        .concat();
+        assert_eq!(
+            eval(script_sig.clone(), pub_key.clone(), Flags::P2SH),
+            Ok(true)
+        );
+        assert_eq!(
+            eval(script_sig.clone(), pub_key.clone(), Flags::SigHashAllOnly),
+            Ok(true)
+        );
+        assert!(is_not_all(eval(
+            script_sig,
+            pub_key,
+            Flags::P2SH | Flags::SigHashAllOnly
+        )));
+    }
+
+    /// A signature is only supplied to a checksig operation that executes: in an
+    /// `OP_IF` branch that is not taken, the operation does not run.
+    #[test]
+    fn signatures_in_unexecuted_branches_are_not_checked() {
+        let branch =
+            |condition: u8| alloc::vec![condition, OP_IF, 1, 0x00, OP_CHECKSIG, OP_NOT, OP_ENDIF];
+        assert_eq!(
+            eval(sig(0x81), branch(OP_0), Flags::SigHashAllOnly),
+            Ok(true)
+        );
+        assert!(is_not_all(eval(
+            sig(0x81),
+            branch(OP_1),
+            Flags::SigHashAllOnly
+        )));
+    }
+
+    #[test]
+    fn code_is_unaffected_without_checksig() {
+        let pub_key = Code(alloc::vec![OP_NOT]);
+        assert_eq!(
+            eval(alloc::vec![OP_0], pub_key.0, Flags::SigHashAllOnly),
+            Ok(true)
+        );
     }
 }

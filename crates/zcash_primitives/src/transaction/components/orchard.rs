@@ -9,7 +9,7 @@ use nonempty::NonEmpty;
 use core::mem::size_of;
 use orchard::{
     Action, Anchor, ValuePool,
-    bundle::{Authorization, Authorized, BundleVersion, Flags},
+    bundle::{Authorization, Authorized, BundleVersion, Flags, commitments::V7SignatureField},
     note::{ExtractedNoteCommitment, Nullifier, TransmittedNoteCiphertext},
     primitives::redpallas::{self, SigType, Signature, SpendAuth, VerificationKey},
     value::ValueCommitment,
@@ -21,7 +21,7 @@ use zcash_protocol::{
     value::ZatBalance,
 };
 
-use crate::transaction::Transaction;
+use crate::transaction::{Transaction, v7};
 
 pub const FLAG_SPENDS_ENABLED: u8 = 0b0000_0001;
 pub const FLAG_OUTPUTS_ENABLED: u8 = 0b0000_0010;
@@ -92,19 +92,7 @@ fn read_bundle<R: Read>(
     mut reader: R,
     bundle_version: Option<BundleVersion>,
 ) -> io::Result<Option<orchard::Bundle<Authorized, ZatBalance>>> {
-    #[allow(clippy::redundant_closure)]
-    let encodings = Vector::read(&mut reader, |r| read_action_encoding(r))?;
-    // Decode every Action's points together (see
-    // `orchard::Action::batch_from_encodings`).
-    let actions_without_auth = orchard::Action::batch_from_encodings(encodings).map_err(|e| {
-        let kind = match e {
-            orchard::ActionDecodeError::InvalidCvNet | orchard::ActionDecodeError::InvalidRk => {
-                io::ErrorKind::InvalidInput
-            }
-            _ => io::ErrorKind::InvalidData,
-        };
-        io::Error::new(kind, e)
-    })?;
+    let actions_without_auth = read_actions_without_auth(&mut reader)?;
     if actions_without_auth.is_empty() {
         Ok(None)
     } else {
@@ -148,6 +136,177 @@ fn read_bundle<R: Read>(
         .map(Some)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
+}
+
+/// Reads a `compactSize`-prefixed sequence of Actions without their authorization,
+/// decoding every Action's points together (see `orchard::Action::batch_from_encodings`).
+fn read_actions_without_auth<R: Read>(mut reader: R) -> io::Result<Vec<Action<()>>> {
+    #[allow(clippy::redundant_closure)]
+    let encodings = Vector::read(&mut reader, |r| read_action_encoding(r))?;
+    orchard::Action::batch_from_encodings(encodings).map_err(|e| {
+        let kind = match e {
+            orchard::ActionDecodeError::InvalidCvNet | orchard::ActionDecodeError::InvalidRk => {
+                io::ErrorKind::InvalidInput
+            }
+            _ => io::ErrorKind::InvalidData,
+        };
+        io::Error::new(kind, e)
+    })
+}
+
+/// The effecting data of a v7 Orchard or Ironwood bundle ([ZIP 248]): its Actions
+/// without authorization, and its encoded flags.
+///
+/// The encoding is the same for both pools and every bundle version. Which flags a
+/// bundle may set depends on its [`BundleVersion`], which [`V7Effects::into_bundle`]
+/// checks.
+///
+/// [ZIP 248]: https://zips.z.cash/zip-0248
+pub(crate) struct V7Effects {
+    actions: NonEmpty<Action<()>>,
+    flag_byte: u8,
+}
+
+/// The authorizing data of a v7 Orchard or Ironwood bundle, with each `sighashInfo` of
+/// any variant.
+pub(crate) struct V7Auth {
+    anchor: Anchor,
+    proof: Vec<u8>,
+    spend_auth_sigs: Vec<v7::sighash_info::Signature>,
+    binding_sig: v7::sighash_info::Signature,
+}
+
+impl V7Effects {
+    /// Reads the effecting data, which must have at least one Action.
+    pub(crate) fn read<R: Read>(mut reader: R) -> io::Result<Self> {
+        let actions =
+            NonEmpty::from_vec(read_actions_without_auth(&mut reader)?).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "an empty v7 Orchard-protocol bundle must be omitted",
+                )
+            })?;
+        let mut flag_byte = [0; 1];
+        reader.read_exact(&mut flag_byte)?;
+        Ok(Self {
+            actions,
+            flag_byte: flag_byte[0],
+        })
+    }
+
+    /// T.3.3 `orchard_effects_digest` or T.3.4 `ironwood_effects_digest`, for the bundle
+    /// of `pool`.
+    pub(crate) fn effects_digest(&self, pool: ValuePool) -> blake2b_simd::Hash {
+        orchard::bundle::commitments::hash_v7_bundle_effects(pool, &self.actions, self.flag_byte)
+    }
+
+    /// Reads the authorizing data that completes these effects, which has one spend
+    /// authorization signature per Action.
+    pub(crate) fn read_auth<R: Read>(&self, mut reader: R) -> io::Result<V7Auth> {
+        Ok(V7Auth {
+            anchor: read_anchor(&mut reader)?,
+            proof: Vector::read_bytes(&mut reader)?,
+            spend_auth_sigs: Array::read(&mut reader, self.actions.len(), |r| {
+                v7::sighash_info::Signature::read(r)
+            })?,
+            binding_sig: v7::sighash_info::Signature::read(&mut reader)?,
+        })
+    }
+
+    /// Assembles the bundle of `bundle_version` from these effects, their authorizing
+    /// data, whose signatures must use sighash variant 0, and `value_balance`, its entry
+    /// in `mValuePoolDeltas`.
+    pub(crate) fn into_bundle(
+        self,
+        auth: V7Auth,
+        value_balance: ZatBalance,
+        bundle_version: BundleVersion,
+    ) -> io::Result<orchard::Bundle<Authorized, ZatBalance>> {
+        let flags = read_flags(&[self.flag_byte][..], bundle_version)?;
+        let mut spend_auth_sigs = auth.spend_auth_sigs.into_iter();
+        let actions = self
+            .actions
+            .into_iter()
+            .map(|action| {
+                action.try_map(|_| {
+                    let sig = spend_auth_sigs
+                        .next()
+                        .expect("one signature was read for each of the Actions");
+                    sig.into_v0().map(Signature::<redpallas::SpendAuth>::from)
+                })
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let actions =
+            NonEmpty::from_vec(actions).expect("the effecting data has at least one Action");
+        let binding_signature = Signature::<redpallas::Binding>::from(auth.binding_sig.into_v0()?);
+
+        // `try_from_parts` rejects a proof whose length is not the canonical size for the
+        // number of Actions (GHSA-2x4w-pxqw-58v9).
+        orchard::Bundle::try_from_parts(
+            actions,
+            flags,
+            value_balance,
+            auth.anchor,
+            orchard::bundle::Authorized::from_parts(
+                orchard::Proof::new(auth.proof),
+                binding_signature,
+            ),
+            bundle_version,
+        )
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    }
+}
+
+impl V7Auth {
+    /// A.1.3 `orchard_auth_digest` or A.1.4 `ironwood_auth_digest`, for the bundle of
+    /// `pool`.
+    pub(crate) fn auth_digest(&self, pool: ValuePool) -> blake2b_simd::Hash {
+        fn field(sig: &v7::sighash_info::Signature) -> V7SignatureField<'_> {
+            V7SignatureField {
+                sighash_info: sig.sighash_info.field_encoding(),
+                signature: sig.signature,
+            }
+        }
+        orchard::bundle::commitments::hash_v7_bundle_auth(
+            pool,
+            &self.anchor,
+            &self.proof,
+            self.spend_auth_sigs.iter().map(field),
+            field(&self.binding_sig),
+        )
+    }
+}
+
+/// Writes the effecting data of a v7 Orchard or Ironwood bundle.
+pub(crate) fn write_v7_effects<W: Write>(
+    mut writer: W,
+    bundle: &orchard::Bundle<Authorized, ZatBalance>,
+) -> io::Result<()> {
+    Vector::write_nonempty(&mut writer, bundle.actions(), |w, a| {
+        write_action_without_auth(w, a)
+    })?;
+    writer.write_all(&[bundle.flag_byte()])
+}
+
+/// Writes the authorizing data of a v7 Orchard or Ironwood bundle.
+pub(crate) fn write_v7_auth<W: Write>(
+    mut writer: W,
+    bundle: &orchard::Bundle<Authorized, ZatBalance>,
+) -> io::Result<()> {
+    writer.write_all(&bundle.anchor().to_bytes())?;
+    Vector::write(
+        &mut writer,
+        bundle.authorization().proof().as_ref(),
+        |w, b| w.write_all(&[*b]),
+    )?;
+    for action in bundle.actions() {
+        v7::sighash_info::write_v0(&mut writer)?;
+        writer.write_all(&<[u8; 64]>::from(action.authorization()))?;
+    }
+    v7::sighash_info::write_v0(&mut writer)?;
+    writer.write_all(&<[u8; 64]>::from(
+        bundle.authorization().binding_signature(),
+    ))
 }
 
 /// Returns the [`BundleVersion`] in effect for the given Orchard-protocol value pool
@@ -506,7 +665,7 @@ pub mod testing {
     /// The Orchard-slot [`BundleVersion`] for a transaction version: `orchard_v3()` in v6 (where
     /// the Orchard pool forbids cross-address transfers), `orchard_v2()` otherwise.
     fn orchard_bundle_version(v: TxVersion) -> BundleVersion {
-        if matches!(v, TxVersion::V6) {
+        if matches!(v, TxVersion::V6 | TxVersion::V7) {
             return BundleVersion::orchard_v3();
         }
         let _ = v;

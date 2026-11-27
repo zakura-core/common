@@ -191,10 +191,11 @@ impl BundleVersion {
 
 /// The transaction version a bundle's commitments are computed for.
 ///
-/// An Orchard bundle at NU6.3 and later may be encoded in either a v5 or a v6 transaction.
-/// The two formats use different commitment personalization strings and include the bundle's
+/// An Orchard bundle at NU6.3 and later may be encoded in a v5, v6, or v7 transaction.
+/// The formats use different commitment personalization strings and include the bundle's
 /// anchor in different digests: v5 includes the anchor in the transaction-ID digest, while v6
-/// includes it in the authorizing digest. Ironwood bundles exist only in v6 transactions, so
+/// and v7 include it in the authorizing digest. v7 also leaves the value balance out of the
+/// transaction-ID digest. Ironwood bundles exist only in v6 and v7 transactions, so
 /// attempting to compute an Ironwood commitment for a v5 transaction returns an error.
 ///
 /// This is independent of the [`BundleVersion`] that governs construction: the same
@@ -208,6 +209,11 @@ pub enum TxVersion {
     V5,
     /// A v6 transaction.
     V6,
+    /// A v7 transaction ([ZIP 248]), in which the Orchard and Ironwood pools each have
+    /// their own bundle type.
+    ///
+    /// [ZIP 248]: https://zips.z.cash/zip-0248
+    V7,
 }
 
 /// Flags denoting what operations may be performed by the Orchard actions
@@ -899,8 +905,9 @@ impl core::error::Error for BundleError {}
 pub enum CommitmentError {
     /// The requested transaction version is not valid for the bundle's [`BundleVersion`].
     ///
-    /// Ironwood bundles exist only in v6 transactions, so an Ironwood bundle
-    /// (`BundleVersion::ironwood_v3()`) cannot be committed with `TxVersion::V5`.
+    /// Ironwood bundles exist only in v6 and v7 transactions, so an Ironwood bundle
+    /// (`BundleVersion::ironwood_v3()`) cannot be committed with `TxVersion::V5`. A v7
+    /// transaction has no commitment to an absent bundle.
     InvalidTransactionVersion,
 }
 
@@ -1404,13 +1411,24 @@ pub(crate) mod tests {
         use crate::ValuePool;
         use crate::bundle::commitments::{hash_bundle_auth_empty, hash_bundle_txid_empty};
 
-        // The three commitment formats — Orchard v5, Orchard v6, Ironwood v6 — use distinct
-        // personalizations, so the absent-bundle digests are all different from one another.
+        // The three formats with absent-bundle digests — Orchard v5, Orchard v6, Ironwood
+        // v6 — use distinct personalizations, so those digests all differ. A v7
+        // transaction omits an absent bundle instead.
         let formats = [
             (ValuePool::Orchard, TxVersion::V5),
             (ValuePool::Orchard, TxVersion::V6),
             (ValuePool::Ironwood, TxVersion::V6),
         ];
+        for pool in [ValuePool::Orchard, ValuePool::Ironwood] {
+            assert!(matches!(
+                hash_bundle_txid_empty(pool, TxVersion::V7),
+                Err(CommitmentError::InvalidTransactionVersion)
+            ));
+            assert!(matches!(
+                hash_bundle_auth_empty(pool, TxVersion::V7),
+                Err(CommitmentError::InvalidTransactionVersion)
+            ));
+        }
         for i in 0..formats.len() {
             for j in (i + 1)..formats.len() {
                 let (pi, ti) = formats[i];
