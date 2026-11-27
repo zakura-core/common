@@ -965,9 +965,10 @@ impl<P, U> Builder<P, U> {
 
         {
             // Ironwood is available only when the target version carries an Ironwood bundle
-            // (V6) and the consensus branch is one in which Ironwood is active.
+            // and the consensus branch is one in which Ironwood is active.
             let ironwood_branch =
-                matches!(self.consensus_branch_id, BranchId::Nu6_3 | BranchId::Nu7);
+                bundle_version_for_branch(self.consensus_branch_id, orchard::ValuePool::Ironwood)
+                    .is_some();
             let ironwood_available = version.has_ironwood() && ironwood_branch;
             if !ironwood_available && self.ironwood_in_use() {
                 return Err(Error::TargetIncompatible(
@@ -2305,6 +2306,7 @@ mod tests {
             nu6_2: Some(BlockHeight::from_u32(9)),
             nu6_3: Some(BlockHeight::from_u32(10)),
             nu7: None,
+            nu7_1: None,
         }
     }
 
@@ -2324,6 +2326,7 @@ mod tests {
             nu6_2: Some(BlockHeight::from_u32(9)),
             nu6_3: Some(BlockHeight::from_u32(10)),
             nu7: Some(BlockHeight::from_u32(11)),
+            nu7_1: None,
         }
     }
 
@@ -2584,6 +2587,45 @@ mod tests {
             )
             .unwrap();
 
+        assert_matches!(
+            builder.build_for_pczt(
+                thread_rng(),
+                &crate::transaction::fees::zip317::FeeRule::standard(),
+            ),
+            Err(Error::InsufficientFunds(_))
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", feature = "pczt"))]
+    fn build_for_pczt_accepts_ironwood_under_nu7_1() {
+        let mut network = nu7_test_network();
+        network.nu7_1 = Some(12u32.into());
+        let mut builder = Builder::new(
+            network,
+            12u32.into(),
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+                orchard_padding: BundlePadding::DEFAULT,
+                ironwood_padding: BundlePadding::DEFAULT,
+            },
+        );
+        let recipient = orchard::keys::FullViewingKey::from(
+            &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
+        )
+        .address_at(0u32, orchard::keys::Scope::External);
+        builder
+            .add_ironwood_output::<crate::transaction::fees::zip317::FeeRule>(
+                None,
+                recipient,
+                Zatoshis::const_from_u64(10_000),
+                MemoBytes::empty(),
+            )
+            .unwrap();
+
+        // The Ironwood output is accepted; only the missing funds stop the build.
         assert_matches!(
             builder.build_for_pczt(
                 thread_rng(),

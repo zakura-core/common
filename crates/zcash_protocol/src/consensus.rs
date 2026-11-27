@@ -517,6 +517,7 @@ impl Parameters for MainNetwork {
             NetworkUpgrade::Nu6_2 => Some(BlockHeight(3_364_600)),
             NetworkUpgrade::Nu6_3 => Some(BlockHeight(3_428_143)),
             NetworkUpgrade::Nu7 => Some(BlockHeight(3_543_405)),
+            NetworkUpgrade::Nu7_1 => None,
         }
     }
 }
@@ -546,6 +547,7 @@ impl Parameters for TestNetwork {
             NetworkUpgrade::Nu6_2 => Some(BlockHeight(4_052_000)),
             NetworkUpgrade::Nu6_3 => Some(BlockHeight(4_134_000)),
             NetworkUpgrade::Nu7 => Some(BlockHeight(4_465_026)),
+            NetworkUpgrade::Nu7_1 => None,
         }
     }
 }
@@ -623,6 +625,14 @@ pub enum NetworkUpgrade {
     ///
     /// [Nu7]: https://z.cash/upgrade/nu7/
     Nu7,
+    /// The NU7.1 network upgrade.
+    ///
+    /// Its rules, including the v7 transaction format of [ZIP 248], are being prepared
+    /// ahead of a deployment ZIP. It has no Mainnet or Testnet activation height, so it
+    /// can only activate on local networks, and its branch ID is a placeholder.
+    ///
+    /// [ZIP 248]: https://zips.z.cash/zip-0248
+    Nu7_1,
 }
 
 impl fmt::Display for NetworkUpgrade {
@@ -639,6 +649,7 @@ impl fmt::Display for NetworkUpgrade {
             NetworkUpgrade::Nu6_2 => write!(f, "Nu6.2"),
             NetworkUpgrade::Nu6_3 => write!(f, "Nu6.3"),
             NetworkUpgrade::Nu7 => write!(f, "Nu7"),
+            NetworkUpgrade::Nu7_1 => write!(f, "Nu7.1"),
         }
     }
 }
@@ -660,6 +671,7 @@ impl NetworkUpgrade {
             NetworkUpgrade::Nu6_2 => BranchId::Nu6_2,
             NetworkUpgrade::Nu6_3 => BranchId::Nu6_3,
             NetworkUpgrade::Nu7 => BranchId::Nu7,
+            NetworkUpgrade::Nu7_1 => BranchId::Nu7_1,
         }
     }
 }
@@ -680,6 +692,7 @@ const UPGRADES_IN_ORDER: &[NetworkUpgrade] = &[
     NetworkUpgrade::Nu6_2,
     NetworkUpgrade::Nu6_3,
     NetworkUpgrade::Nu7,
+    NetworkUpgrade::Nu7_1,
 ];
 
 /// The "grace period" defined in [ZIP 212].
@@ -735,9 +748,17 @@ pub enum BranchId {
     Nu6_3,
     /// The consensus rules to be deployed by [`NetworkUpgrade::Nu7`].
     Nu7,
+    /// The consensus rules to be deployed by [`NetworkUpgrade::Nu7_1`].
+    Nu7_1,
 }
 
 const NU7_BRANCH_ID: u32 = 0x7719_0ad9;
+
+/// Placeholder until the NU7.1 deployment ZIP assigns a branch ID.
+///
+/// This matches the placeholder Zakura uses, so that transactions built here commit to
+/// the same branch ID that a Zakura node on a local network with NU7.1 expects.
+const NU7_1_BRANCH_ID: u32 = 0xffff_fffe;
 
 impl TryFrom<u32> for BranchId {
     type Error = &'static str;
@@ -756,6 +777,7 @@ impl TryFrom<u32> for BranchId {
             0x5437_f330 => Ok(BranchId::Nu6_2),
             0x37a5_165b => Ok(BranchId::Nu6_3),
             NU7_BRANCH_ID => Ok(BranchId::Nu7),
+            NU7_1_BRANCH_ID => Ok(BranchId::Nu7_1),
             _ => Err("Unknown consensus branch ID"),
         }
     }
@@ -776,6 +798,7 @@ impl From<BranchId> for u32 {
             BranchId::Nu6_2 => 0x5437_f330,
             BranchId::Nu6_3 => 0x37a5_165b,
             BranchId::Nu7 => NU7_BRANCH_ID,
+            BranchId::Nu7_1 => NU7_1_BRANCH_ID,
         }
     }
 }
@@ -814,6 +837,7 @@ impl BranchId {
             BranchId::Nu6_2 => NetworkUpgrade::Nu6_2,
             BranchId::Nu6_3 => NetworkUpgrade::Nu6_3,
             BranchId::Nu7 => NetworkUpgrade::Nu7,
+            BranchId::Nu7_1 => NetworkUpgrade::Nu7_1,
         })
     }
 
@@ -869,7 +893,7 @@ impl BranchId {
             Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy | Nu5 | Nu6 | Nu6_1
             | Nu6_2 => true,
             BranchId::Nu6_3 => true,
-            BranchId::Nu7 => false,
+            BranchId::Nu7 | BranchId::Nu7_1 => false,
         }
     }
 
@@ -880,7 +904,7 @@ impl BranchId {
             Sprout | Overwinter => false,
             Sapling | Blossom | Heartwood | Canopy | Nu5 | Nu6 | Nu6_1 | Nu6_2 => true,
             BranchId::Nu6_3 => true,
-            BranchId::Nu7 => true,
+            BranchId::Nu7 | BranchId::Nu7_1 => true,
         }
     }
 
@@ -891,7 +915,7 @@ impl BranchId {
             Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy => false,
             Nu5 | Nu6 | Nu6_1 | Nu6_2 => true,
             BranchId::Nu6_3 => true,
-            BranchId::Nu7 => true,
+            BranchId::Nu7 | BranchId::Nu7_1 => true,
         }
     }
 
@@ -905,7 +929,7 @@ impl BranchId {
             Nu5 | Nu6 | Nu6_1 => Some(OrchardProtocolRevision::InsecureV1),
             Nu6_2 => Some(OrchardProtocolRevision::V2),
             Nu6_3 => Some(OrchardProtocolRevision::V3),
-            Nu7 => Some(OrchardProtocolRevision::V3),
+            Nu7 | Nu7_1 => Some(OrchardProtocolRevision::V3),
         }
     }
 }
@@ -954,6 +978,7 @@ pub mod testing {
             BranchId::Nu6_2,
             BranchId::Nu6_3,
             BranchId::Nu7,
+            BranchId::Nu7_1,
         ])
     }
 
@@ -1020,6 +1045,7 @@ mod tests {
                 nu6_2: Some(BlockHeight(5)),
                 nu6_3,
                 nu7: Some(BlockHeight(20)),
+                nu7_1: None,
             };
             for branch in core::iter::once(BranchId::Sprout)
                 .chain(UPGRADES_IN_ORDER.iter().map(|upgrade| upgrade.branch_id()))
@@ -1076,6 +1102,24 @@ mod tests {
         assert_eq!(u32::from(BranchId::Nu7), 0x7719_0ad9);
         assert!(BranchId::try_from(0x7719_0ad8).is_err());
         assert!(BranchId::try_from(1).is_err());
+    }
+
+    #[test]
+    fn nu7_1_is_only_configurable_locally() {
+        assert_eq!(BranchId::try_from(0xffff_fffe), Ok(BranchId::Nu7_1));
+        assert_eq!(u32::from(BranchId::Nu7_1), 0xffff_fffe);
+        assert_eq!(
+            BranchId::Nu7_1.network_upgrade(),
+            Some(NetworkUpgrade::Nu7_1)
+        );
+        for network in [Network::MainNetwork, Network::TestNetwork] {
+            assert_eq!(network.activation_height(NetworkUpgrade::Nu7_1), None);
+            assert_eq!(BranchId::Nu7_1.height_bounds(&network), None);
+            assert_eq!(
+                BranchId::for_height(&network, BlockHeight(u32::MAX)),
+                BranchId::Nu7,
+            );
+        }
     }
 
     #[test]
