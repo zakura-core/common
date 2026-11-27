@@ -1,6 +1,6 @@
 //! A PQ transparent output, carrying a format and a scheme, and the spends that satisfy it.
 //!
-//! The output is exactly `00 vv 20 <commitment>`, thirty-five bytes: `OP_0`, the
+//! The output is exactly `00 5s 20 <commitment>`, thirty-five bytes: `OP_0`, the
 //! small-integer opcode naming the signature scheme, and a thirty-two-byte push of
 //! `SHA-256(body)`. The body is the script the spending input pushes last, and all of it
 //! executes. The format and the scheme live in the output and nowhere else, so the
@@ -396,9 +396,9 @@ impl PqSpend<'_> {
     ///
     /// Count this, not the serialized input: a PQ input's signature pushes exceed the
     /// legacy push bound, where legacy counting stops and would report almost none of the
-    /// checks the body performs. One SLH-DSA check costs far more than one ECDSA check,
-    /// so whoever sets a block budget must weight the two differently; this count does
-    /// not distinguish them.
+    /// checks the body performs. It counts checks, not their cost: one SLH-DSA check costs
+    /// far more than one ECDSA check, and the work a block can demand under the existing
+    /// limits is still to be qualified.
     pub fn sig_op_count(&self, accurate: bool) -> u32 {
         Code(self.body().to_vec()).sig_op_count(accurate)
     }

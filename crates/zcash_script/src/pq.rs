@@ -156,7 +156,7 @@ fn arguments(mut bytes: &[u8]) -> Result<Stack<Vec<u8>>, Error> {
 /// This is preliminary parsing, not authorization or legacy validation. The full
 /// input is bounded by [`MAX_INPUT_BYTES`]; payload lengths must fit that input.
 /// No PQ argument-size or stack-depth rules are selected until the caller has
-/// authenticated the redeem script and recognized its execution identifier.
+/// matched the final item against the output's commitment.
 pub struct SpendingInput<'a> {
     arguments: &'a [u8],
     redeem_script: PushedValue<'a>,
@@ -187,7 +187,7 @@ impl<'a> SpendingInput<'a> {
         })
     }
 
-    /// Returns the complete redeem script, including any execution identifier.
+    /// Returns the final pushed item, the script the output commits to.
     pub fn redeem_script(&self) -> &[u8] {
         self.redeem_script.as_bytes()
     }

@@ -556,9 +556,9 @@ impl TransparentBuilder {
     /// spend the output. Nothing here can check that a body exists for this commitment, so
     /// a wrong commitment makes an output nobody can spend, exactly as a wrong address does.
     ///
-    /// This takes a parameter set rather than a script, so the version written is always one
-    /// that is defined: there is no way through this builder to create an output in a
-    /// version nothing implements. Whether these outputs may be created at all at a given
+    /// This takes a parameter set rather than a script, so the format and scheme written are
+    /// always a defined pair: there is no way through this builder to create an output the
+    /// rules restrict. Whether these outputs may be created at all at a given
     /// height is the caller's to enforce; see [`crate::pq::output`].
     #[cfg(feature = "pq")]
     pub fn add_pq_output(

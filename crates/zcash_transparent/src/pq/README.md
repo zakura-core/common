@@ -3,11 +3,12 @@
 The optional `pq` feature provides SLH-DSA transparent spends behind a dedicated output
 type. Its format and signature scheme are bytes of the output itself, so both are visible on
 chain when the payment is made rather than when the receiver spends. These library APIs
-activate no consensus rule and define no address format.
+activate no consensus rule. The Unified Address receiver that carries a commitment lives
+in `zcash_address` and `zcash_keys`.
 
 ## Encoding
 
-An output of the one format defined here is exactly `00 vv 20 <commitment>`, 35 bytes:
+An output of the one format defined here is exactly `00 5s 20 <commitment>`, 35 bytes:
 `OP_0 OP_<scheme> PUSH32(commitment)`. The commitment is `SHA-256(body)`, where the body is
 an ordinary transparent script and carries no header of its own. A spending input is
 push-only, pushes the body last, and pushes the body's arguments before it. All of the body
@@ -184,10 +185,10 @@ matching.
 Count signature operations with `PqSpend::sig_op_count`, over the committed body. Do not
 count them over the serialized input: its signature pushes exceed the legacy push bound,
 where legacy counting stops and would report almost none of the checks the body performs.
-One SLH-DSA check costs far more than one ECDSA check, and that count does not distinguish
-them, so a block budget must weight them separately. These bounds describe this
-prototype's behavior; acceptable block verification time, memory use, relay policy and
-fees still need qualification, and ZIP 317 currently has no rule that fits a 17 kB input.
+It counts checks, not their cost: one SLH-DSA check costs far more than one ECDSA check.
+Fees use ZIP 317's existing size rule, which already charges a 17 kB input for its bytes.
+These bounds describe this prototype's behavior; the verification work a block can demand
+under them, memory use and relay policy still need qualification.
 
 ## Security argument and limits
 
@@ -244,6 +245,6 @@ transaction structure, including SINGLE without a corresponding output, before r
 one.
 
 Independent NIST key-generation and OpenSSL signature fixtures are documented in
-`test_vectors/README.md`. Dependency review, network activation, node admission, address
-encoding, wallet derivation, signing-device support, a fee rule and production resource
-qualification all remain outside this library change.
+`test_vectors/README.md`. Dependency review, network activation, node admission, the
+standalone address encoding, wallet derivation, signing-device support and production
+resource qualification all remain outside this library change.
