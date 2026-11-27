@@ -159,14 +159,16 @@ which would be stronger than either alone; that one falls out of the rule rather
 having been weighed on its own.
 
 PQ execution rules are fixed rather than flag-driven: `CHECKLOCKTIMEVERIFY` is always
-enforced, every push in the input and the body must use its shortest encoding, every item
+enforced, every push in the input and every push the body executes must use its shortest
+encoding, every item
 read as a number must be minimally encoded, `IF` and `NOTIF` take only an empty item or
 `0x01`, and execution must end with exactly one stack item. These deny a third party cheap
 edits to someone else's spend, since ZIP 244 leaves the serialized input out of the
 transaction identifier: without them a true `OP_1` given to `IF` could be respelled `OP_2`,
 or a false `OP_0` a pushed `0x00`, and the spend would stay valid. The body's own pushes
 are committed and cannot be edited, but are held to the same rule so a script has one
-spelling; a wallet must write bodies minimally, or the output cannot be spent. An item a
+spelling; a wallet must write bodies minimally, or a path that executes a longer push
+cannot be spent. An item a
 body reads only for its truth elsewhere (`VERIFY`, `IFDUP`, the final result) is not
 constrained, so a body should not take one from its input. There
 are no interpreter flags to pass: this module verifies PQ outputs and nothing else, so

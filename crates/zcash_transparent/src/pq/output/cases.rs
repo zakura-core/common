@@ -670,6 +670,21 @@ fn a_copied_real_signature_needs_another_signatures_worth_of_bytes() {
 }
 
 #[test]
+fn padding_that_pays_for_more_checks_than_the_script_has_counts_only_its_checks() {
+    // DROP <K> CHECKSIG, with a signature-sized junk argument the body discards: the input
+    // pays for two checks, but the script can only ever run one.
+    let key = signing_key(1);
+    let mut body = vec![0x75];
+    body.extend(push(&key.public_key()));
+    body.push(0xac);
+    // The junk goes last, so it is on top for DROP.
+    let mut arguments = push(&signature_by(&key));
+    arguments.extend(push(&vec![0xee; crypto::SIGNATURE_BYTES]));
+    assert!(input(&arguments, &body).len() >= 2 * crypto::SIGNATURE_BYTES);
+    assert_eq!(spend(&arguments, &body), (Ok(true), 1));
+}
+
+#[test]
 fn multisig_opcodes_are_refused_even_where_they_never_run() {
     let key = signing_key(1);
     // <K> CHECKSIG 0 IF CHECKMULTISIG ENDIF: a valid single-signer spend with a multisig

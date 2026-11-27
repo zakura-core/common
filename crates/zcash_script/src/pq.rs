@@ -13,7 +13,8 @@
 //! the serialized input out of the transaction identifier and a third party could otherwise
 //! edit someone else's spend and keep it valid:
 //!
-//! - every pushed item, in the input and the script, uses its shortest encoding;
+//! - every item the input pushes, and every push the script executes, uses its shortest
+//!   encoding;
 //! - every item read as a number is minimally encoded, so `1` has one spelling;
 //! - `IF` and `NOTIF` take only an empty item or `0x01`, so a true `OP_1` cannot become
 //!   `OP_2`, nor a false `OP_0` a pushed `0x00` or `0x80` (Bitcoin's `MINIMALIF`);
@@ -159,13 +160,10 @@ impl SignatureChecker for Budgeted<'_> {
         }
     }
 
-    fn check_sig(
-        &self,
-        signature: &signature::Decoded,
-        public_key: &[u8],
-        script_code: &script::Code,
-    ) -> bool {
-        self.inner.check_sig(signature, public_key, script_code)
+    /// Never true: every check must pass through [`Self::check_signature`] to be charged,
+    /// so a path that reached this one directly would fail rather than check for free.
+    fn check_sig(&self, _: &signature::Decoded, _: &[u8], _: &script::Code) -> bool {
+        false
     }
 
     fn check_lock_time(&self, lock_time: i64) -> bool {
