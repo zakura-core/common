@@ -62,6 +62,14 @@ mod sealed {
         /// compile time; only powers of the base are computed at runtime.
         fn pow_sqrt_exponent(value: &PastaField<M>) -> PastaField<M>;
 
+        /// Raises every lane to `(t - 1) / 2`, where `p - 1 = t * 2^32`.
+        ///
+        /// Runs [`Self::pow_sqrt_exponent`]'s schedule on all lanes together,
+        /// interleaving the otherwise serial per-lane multiplication chains.
+        fn pow_sqrt_exponent_lanes<const L: usize>(
+            values: &[PastaField<M>; L],
+        ) -> [PastaField<M>; L];
+
         /// Computes a square root using this modulus's larger table.
         ///
         /// Requires a nonzero `value` and `w = pow_sqrt_exponent(value)`.
@@ -70,6 +78,16 @@ mod sealed {
             value: &PastaField<M, Reduced>,
             w: PastaField<M>,
         ) -> Option<PastaField<M, Reduced>>;
+
+        /// Computes the square roots of nonzero lanes with the exponentiation
+        /// and the larger table's squarings in AVX2 vectors, or returns `None`
+        /// unless `L` lanes fill one or two vectors.
+        ///
+        /// Each root equals [`Self::sqrt_large`]'s for the same lane.
+        #[cfg(all(feature = "sqrt-table-large", udon_avx2, not(miri)))]
+        fn sqrt_large_vectors<const L: usize>(
+            values: &[PastaField<M, Reduced>; L],
+        ) -> Option<[Option<PastaField<M, Reduced>>; L]>;
 
         /// Corrects `x` with `x^2 = a * t` for nonzero `a` and order-2^32
         /// subgroup element `t`. Returns a root of `a`, or of `a * ROOTS[32]`
@@ -183,9 +201,57 @@ macro_rules! pasta_field_parameters {
                     emission = batched).0
             }
 
+            fn pow_sqrt_exponent_lanes<const L: usize>(
+                values: &[PastaField<Self>; L],
+            ) -> [PastaField<Self>; L] {
+                // One or two whole AVX2 vectors of lanes run the same
+                // schedule four lanes per register; other widths keep the
+                // scalar interleaving.
+                #[cfg(all(udon_avx2, not(miri)))]
+                {
+                    if L == AVX2_LANES {
+                        return power_vectors::<Self, L, 1>(values, |power| {
+                            bento::addition_chain!(power, tonelli_shanks($modulus, 32),
+                                emission = batched)
+                        });
+                    }
+                    if L == 2 * AVX2_LANES {
+                        return power_vectors::<Self, L, 2>(values, |power| {
+                            bento::addition_chain!(power, tonelli_shanks($modulus, 32),
+                                emission = batched)
+                        });
+                    }
+                }
+                bento::addition_chain!(PowerLanes(*values), tonelli_shanks($modulus, 32),
+                    emission = batched).0
+            }
+
             #[cfg(feature = "sqrt-table-large")]
             fn sqrt_large(value: &PastaField<Self, Reduced>, w: PastaField<Self>) -> Option<PastaField<Self, Reduced>> {
                 Self::SQRT_TABLE.sqrt(value, w, $hash)
+            }
+
+            #[cfg(all(feature = "sqrt-table-large", udon_avx2, not(miri)))]
+            fn sqrt_large_vectors<const L: usize>(
+                values: &[PastaField<Self, Reduced>; L],
+            ) -> Option<[Option<PastaField<Self, Reduced>>; L]> {
+                let powers = if L == AVX2_LANES {
+                    sqrt_power_vectors::<Self, L, 1>(values, |power| {
+                        bento::addition_chain!(power, tonelli_shanks($modulus, 32),
+                            emission = batched)
+                    })
+                } else if L == 2 * AVX2_LANES {
+                    sqrt_power_vectors::<Self, L, 2>(values, |power| {
+                        bento::addition_chain!(power, tonelli_shanks($modulus, 32),
+                            emission = batched)
+                    })
+                } else {
+                    return None;
+                };
+                Some(powers.map(|(x, powers)| {
+                    let (is_square, root) = Self::SQRT_TABLE.finish_with_powers(x, powers, $hash);
+                    is_square.then(|| root.reduce())
+                }))
             }
 
             #[cfg(feature = "sqrt-table-large")]
@@ -326,6 +392,93 @@ impl<M: PrimeModulus> Power<M> {
             super::montgomery::square_run::<M>(&self.0.limbs, count, factor),
         ))
     }
+}
+
+// Lane-interleaved multiplicative chain. The planner's schedule runs on every
+// lane together so the lanes' independent dependency chains overlap.
+#[derive(Clone)]
+struct PowerLanes<M: PrimeModulus, const L: usize>([PastaField<M>; L]);
+
+impl<M: PrimeModulus, const L: usize> bento::addchain::AdditionChain for PowerLanes<M, L> {
+    #[inline]
+    fn double(&self) -> Self {
+        Self(core::array::from_fn(|lane| self.0[lane].square()))
+    }
+
+    #[inline]
+    fn add(&self, rhs: &Self) -> Self {
+        Self(core::array::from_fn(|lane| self.0[lane].mul(&rhs.0[lane])))
+    }
+
+    // Keep the default double_n and double_n_add: they double all lanes per
+    // step, preserving the interleaving that Power's fused square_run would
+    // serialize lane by lane.
+}
+
+#[cfg(all(udon_avx2, not(miri)))]
+use crate::field::x86_64_avx2::{LANES as AVX2_LANES, PowerVectors};
+
+// Runs a multiplicative chain on `L = 4 * G` lanes in `G` AVX2 vectors. The
+// lanes' values match `PowerLanes` on the same inputs; only their loose
+// representatives may differ.
+#[cfg(all(udon_avx2, not(miri)))]
+fn power_vectors<M: PrimeModulus, const L: usize, const G: usize>(
+    values: &[PastaField<M>; L],
+    chain: impl FnOnce(PowerVectors<M, G>) -> PowerVectors<M, G>,
+) -> [PastaField<M>; L] {
+    let powers = chain(PowerVectors::enter(&vector_limbs(values))).leave();
+    core::array::from_fn(|lane| lane_value(&powers, lane))
+}
+
+// The large table's square-root inputs for `L = 4 * G` nonzero lanes, all
+// from AVX2 vectors: with `w = a^((t - 1) / 2)` from `chain`, each lane gets
+// `x = a * w` and the powers of `a * w^2` that `LargeSqrtTable::finish`
+// would otherwise square one lane at a time.
+#[cfg(all(feature = "sqrt-table-large", udon_avx2, not(miri)))]
+fn sqrt_power_vectors<M: PrimeModulus, const L: usize, const G: usize>(
+    values: &[PastaField<M, Reduced>; L],
+    chain: impl FnOnce(PowerVectors<M, G>) -> PowerVectors<M, G>,
+) -> [(PastaField<M>, [PastaField<M>; 4]); L] {
+    use bento::addchain::AdditionChain;
+
+    use super::sqrt::DIGIT_BITS;
+
+    let value = PowerVectors::enter(&vector_limbs(values));
+    let w = chain(value.clone());
+    let x = value.add(&w);
+    let x3 = x.add(&w);
+    let x2 = x3.double_n(DIGIT_BITS);
+    let x1 = x2.double_n(DIGIT_BITS);
+    let x0 = x1.double_n(DIGIT_BITS);
+    let [x, x0, x1, x2, x3] = [x, x0, x1, x2, x3].map(|power| power.leave());
+    core::array::from_fn(|lane| {
+        (
+            lane_value(&x, lane),
+            [&x0, &x1, &x2, &x3].map(|power| lane_value(power, lane)),
+        )
+    })
+}
+
+// Montgomery limbs of `L = 4 * G` lanes, grouped four to a vector.
+#[cfg(all(udon_avx2, not(miri)))]
+fn vector_limbs<M: PrimeModulus, S: ReductionState, const L: usize, const G: usize>(
+    values: &[PastaField<M, S>; L],
+) -> [[[u64; 4]; AVX2_LANES]; G] {
+    assert!(L == G * AVX2_LANES);
+    let mut limbs = [[[0; 4]; AVX2_LANES]; G];
+    for (lane, value) in values.iter().enumerate() {
+        limbs[lane / AVX2_LANES][lane % AVX2_LANES] = value.limbs;
+    }
+    limbs
+}
+
+// One lane of a vector kernel's output, which is below `2p`.
+#[cfg(all(udon_avx2, not(miri)))]
+fn lane_value<M: PrimeModulus, const G: usize>(
+    limbs: &[[[u64; 4]; AVX2_LANES]; G],
+    lane: usize,
+) -> PastaField<M> {
+    PastaField::from_montgomery(limbs[lane / AVX2_LANES][lane % AVX2_LANES])
 }
 
 const fn add_wide(a: [u64; 8], b: [u64; 8]) -> [u64; 8] {

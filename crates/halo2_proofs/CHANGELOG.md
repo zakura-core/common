@@ -10,6 +10,28 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.4.0] - 2026-11-10
+
+### Changed
+
+- Sped up proving over the Pasta fields on x86-64 builds with AVX2 (including
+  the forced `x86_64-asm` backend) by running FFT butterflies four at a time
+  in AVX2; Orchard proofs are about 4% faster
+  ([#721](https://github.com/zakura-core/common/pull/721)).
+- Sped up proving over the Pasta fields on x86-64 builds with AVX2 (including
+  the forced `x86_64-asm` backend) by accumulating the quotient evaluator's
+  weighted sums four rows at a time in AVX2; Orchard proofs are about 4–7%
+  faster
+  ([#722](https://github.com/zakura-core/common/pull/722)).
+- Sped up batch verification by coalescing the batch's MSM terms once, folding
+  each proof's terms at the verifying key's commitments into one scalar per
+  commitment, and building multiopen point sets with bit masks; Orchard batch
+  validation spends about a third less time in multiopen
+  ([#726](https://github.com/zakura-core/common/pull/726)).
+- Sped up proof verification for proofs of two or more circuits (such as
+  Orchard bundles) by evaluating the custom gates of two circuits per pass
+  ([#727](https://github.com/zakura-core/common/pull/727)).
+
 ## [5.3.0] - 2026-11-06
 
 ### Changed

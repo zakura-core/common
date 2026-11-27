@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use core::iter;
 
 use bounded_vec::EmptyBoundedVec;
-use hex::{FromHex, FromHexError};
+use const_hex::{FromHex, FromHexError};
 
 use crate::{
     Opcode, interpreter, num,

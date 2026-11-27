@@ -93,7 +93,7 @@ impl<'t, M: PrimeModulus> FftPlan<'t, M> {
                 true,
             ),
             super::StorageLayout::Fragments { length, whole_bank } => {
-                if !length.get().is_power_of_two() {
+                if !length.is_power_of_two() {
                     return Err(FftError::InvalidExecution);
                 }
                 (length.get().min(size), whole_bank)
@@ -159,7 +159,7 @@ impl<'t, M: PrimeModulus> FftPlan<'t, M> {
                 actual: input,
             });
         }
-        if !tile.get().is_power_of_two()
+        if !tile.is_power_of_two()
             || (matches!(request.support, InputSupport::Prefix(_))
                 && request.input_order == ElementOrder::BitReversed)
             || (request.direction == Direction::Forward

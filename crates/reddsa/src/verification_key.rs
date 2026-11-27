@@ -143,6 +143,28 @@ impl From<pasta_curves::pallas::Affine> for VerificationKey<crate::orchard::Bind
     }
 }
 
+#[cfg(feature = "pallas-pasta")]
+impl From<pasta_curves::pallas::Affine> for VerificationKey<crate::orchard::SpendAuth> {
+    /// Constructs an Orchard spend authorization key from an already-decoded
+    /// affine Pallas point (for example one of many encodings decoded
+    /// together), encoding it from the affine coordinates without another
+    /// field inversion. The caller enforces protocol-specific restrictions
+    /// such as a non-identity `rk`.
+    fn from(affine: pasta_curves::pallas::Affine) -> Self {
+        let point = pasta_curves::pallas::Point::from(affine);
+        let bytes = VerificationKeyBytes {
+            bytes: group::GroupEncoding::to_bytes(&affine),
+            _marker: PhantomData,
+        };
+        debug_assert_eq!(
+            pasta_curves::pallas::Point::from_bytes(&bytes.bytes),
+            Some(point),
+            "spend authorization key point must match its encoding",
+        );
+        Self { point, bytes }
+    }
+}
+
 impl From<VerificationKey<crate::sapling::SpendAuth>> for jubjub::AffinePoint {
     /// Normalizes the stored spend authorization point without decoding it.
     ///

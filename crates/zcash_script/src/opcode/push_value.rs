@@ -242,13 +242,7 @@ impl Asm for LargeValue {
             let n = num::parse(&value, false, Some(8)).unwrap_or(0);
             return n.to_string();
         }
-        // hex::encode(), but avoids the `hex` dependency
-        value
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join("")
-            + &hash_type
+        const_hex::encode(&value) + &hash_type
     }
 }
 

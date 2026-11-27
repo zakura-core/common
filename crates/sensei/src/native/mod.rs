@@ -86,7 +86,7 @@ mod compiled_expressions;
 mod compiled_gates;
 #[cfg(feature = "prover")]
 mod evaluation;
-mod executor;
+pub(crate) mod executor;
 mod expression_layout;
 #[cfg(all(test, feature = "prover"))]
 mod expressions;
@@ -318,6 +318,8 @@ impl PreparedProver {
 mod optimization_tests;
 #[cfg(all(test, feature = "prover"))]
 pub(crate) mod stage_timing;
+#[cfg(all(test, feature = "verifier"))]
+pub(crate) mod task_stats;
 
 /// Builds an array by calling `entry` in index order (`0..LEN`).
 ///

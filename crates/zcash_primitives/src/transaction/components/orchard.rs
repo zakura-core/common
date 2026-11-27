@@ -93,7 +93,18 @@ fn read_bundle<R: Read>(
     bundle_version: Option<BundleVersion>,
 ) -> io::Result<Option<orchard::Bundle<Authorized, ZatBalance>>> {
     #[allow(clippy::redundant_closure)]
-    let actions_without_auth = Vector::read(&mut reader, |r| read_action_without_auth(r))?;
+    let encodings = Vector::read(&mut reader, |r| read_action_encoding(r))?;
+    // Decode every Action's points together (see
+    // `orchard::Action::batch_from_encodings`).
+    let actions_without_auth = orchard::Action::batch_from_encodings(encodings).map_err(|e| {
+        let kind = match e {
+            orchard::ActionDecodeError::InvalidCvNet | orchard::ActionDecodeError::InvalidRk => {
+                io::ErrorKind::InvalidInput
+            }
+            _ => io::ErrorKind::InvalidData,
+        };
+        io::Error::new(kind, e)
+    })?;
     if actions_without_auth.is_empty() {
         Ok(None)
     } else {
@@ -280,6 +291,24 @@ pub fn read_note_ciphertext<R: Read>(mut reader: R) -> io::Result<TransmittedNot
     reader.read_exact(&mut tnc.out_ciphertext)?;
 
     Ok(tnc)
+}
+
+/// Reads an Action's effecting data without decoding its points.
+fn read_action_encoding<R: Read>(mut reader: R) -> io::Result<orchard::ActionEncoding> {
+    let mut cv_net = [0u8; 32];
+    reader.read_exact(&mut cv_net)?;
+    let nf = read_nullifier(&mut reader)?;
+    let mut rk = [0u8; 32];
+    reader.read_exact(&mut rk)?;
+    let cmx = read_cmx(&mut reader)?;
+    let encrypted_note = read_note_ciphertext(&mut reader)?;
+    Ok(orchard::ActionEncoding {
+        cv_net,
+        nf,
+        rk,
+        cmx,
+        encrypted_note,
+    })
 }
 
 pub fn read_action_without_auth<R: Read>(mut reader: R) -> io::Result<Action<()>> {

@@ -278,6 +278,17 @@ impl VerificationKey<Binding> {
         Self(VerificationKeyInner::Binding(key), PhantomData)
     }
 }
+#[cfg(feature = "backend-halo2")]
+impl VerificationKey<SpendAuth> {
+    /// Constructs a spend authorization key from an already-decoded affine
+    /// point, without decoding its encoding again.
+    pub(crate) fn from_decoded_affine(point: pallas::Affine) -> Self {
+        Self(
+            VerificationKeyInner::SpendAuth(raw::VerificationKey::from(point)),
+            PhantomData,
+        )
+    }
+}
 impl<T: SigType> VerificationKey<T> {
     pub(crate) fn from_point(point: pallas::Point) -> Self {
         #[cfg(feature = "backend-sensei")]

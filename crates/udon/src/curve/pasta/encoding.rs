@@ -1,7 +1,16 @@
 //! Canonical compressed encodings, independent of stored Montgomery layout.
 
 use super::{AffinePoint, PastaCurve, Point, curve_rhs};
+use crate::checks::assert_length;
 use crate::field::PastaField;
+
+/// Encodings decoded together by [`Point::batch_from_bytes`]: four
+/// interleaved scalar chains, or two AVX2 vectors of four where the field
+/// backend has them.
+#[cfg(not(all(udon_avx2, not(miri))))]
+const DECODE_LANES: usize = 4;
+#[cfg(all(udon_avx2, not(miri)))]
+const DECODE_LANES: usize = 8;
 
 impl<C: PastaCurve> AffinePoint<C> {
     /// Encodes this point in 32 canonical compressed bytes.
@@ -70,4 +79,147 @@ impl<C: PastaCurve> Point<C> {
             .to_point(),
         )
     }
+
+    /// Decodes a batch of encodings together, interleaving square-root chains.
+    ///
+    /// `output` must have exactly `encodings.len()` elements; a mismatch panics
+    /// before either buffer changes. Accepts and rejects exactly the encodings
+    /// [`Self::from_bytes`] does, writing the same points in order. Returns
+    /// `None` when any encoding is rejected, leaving `output` unspecified.
+    ///
+    /// Full lane groups of ordinary encodings run their square-root
+    /// exponentiations together: as interleaved scalar chains, or four per
+    /// AVX2 register where the field backend has those kernels. Groups holding
+    /// an identity encoding or a zero radicand decode one encoding at a time
+    /// through [`Self::from_bytes`], as does a remainder shorter than a group
+    /// unless padding it to whole vectors is cheaper.
+    ///
+    /// ```
+    /// use zakura_udon::curve::{PallasPoint, PallasProjective};
+    ///
+    /// let g = PallasProjective::GENERATOR.to_point();
+    /// let encodings = [g.to_bytes(), g.neg().to_bytes(), [0; 32]];
+    /// let mut output = [PallasPoint::IDENTITY; 3];
+    /// PallasPoint::batch_from_bytes(&encodings, &mut output).unwrap();
+    /// assert_eq!(output, [g, g.neg(), PallasPoint::IDENTITY]);
+    /// assert_eq!(PallasPoint::batch_from_bytes(&[[0xff; 32]], &mut [g]), None);
+    /// ```
+    pub fn batch_from_bytes(encodings: &[[u8; 32]], output: &mut [Self]) -> Option<()> {
+        assert_length("output", encodings.len(), output.len());
+        let mut chunks = encodings.chunks_exact(DECODE_LANES);
+        let mut decoded = output.chunks_exact_mut(DECODE_LANES);
+        for (chunk, decoded) in (&mut chunks).zip(&mut decoded) {
+            let chunk = chunk.try_into().expect("chunks are lane sized");
+            let decoded = decoded.try_into().expect("chunks are lane sized");
+            decode_lanes::<C, DECODE_LANES>(chunk, decoded)?;
+        }
+        decode_remainder::<C>(chunks.remainder(), decoded.into_remainder())
+    }
+}
+
+// Fewer encodings than a lane group. Scalar lanes gain nothing from padding,
+// so each encoding decodes on its own.
+#[cfg(not(all(udon_avx2, not(miri))))]
+fn decode_remainder<C: PastaCurve>(encodings: &[[u8; 32]], output: &mut [Point<C>]) -> Option<()> {
+    for (encoding, decoded) in encodings.iter().zip(output) {
+        *decoded = Point::from_bytes(*encoding)?;
+    }
+    Some(())
+}
+
+// Fewer encodings than a lane group. An AVX2 vector of four lanes costs about
+// as much as two scalar decodes however many of its lanes are used, so a
+// remainder is padded up to whole vectors wherever that is the cheaper cover:
+// three or four encodings take one vector, five take a vector and a scalar
+// decode, and six or seven take two vectors.
+#[cfg(all(udon_avx2, not(miri)))]
+fn decode_remainder<C: PastaCurve>(encodings: &[[u8; 32]], output: &mut [Point<C>]) -> Option<()> {
+    const VECTOR: usize = DECODE_LANES / 2;
+    match encodings.len() {
+        0 => Some(()),
+        1 | 2 => decode_slice(encodings, output),
+        count if count <= VECTOR => decode_padded::<C, VECTOR>(encodings, output),
+        count if count == VECTOR + 1 => {
+            let (encodings, last) = encodings.split_at(VECTOR);
+            let (output, decoded) = output.split_at_mut(VECTOR);
+            decode_padded::<C, VECTOR>(encodings, output)?;
+            decode_slice(last, decoded)
+        }
+        _ => decode_padded::<C, DECODE_LANES>(encodings, output),
+    }
+}
+
+#[cfg(all(udon_avx2, not(miri)))]
+fn decode_slice<C: PastaCurve>(encodings: &[[u8; 32]], output: &mut [Point<C>]) -> Option<()> {
+    for (encoding, decoded) in encodings.iter().zip(output) {
+        *decoded = Point::from_bytes(*encoding)?;
+    }
+    Some(())
+}
+
+// Decodes up to `N` encodings as one lane group whose unused lanes repeat the
+// first encoding, which changes neither the outcome nor any used lane.
+#[cfg(all(udon_avx2, not(miri)))]
+fn decode_padded<C: PastaCurve, const N: usize>(
+    encodings: &[[u8; 32]],
+    output: &mut [Point<C>],
+) -> Option<()> {
+    let mut group = [encodings[0]; N];
+    group[..encodings.len()].copy_from_slice(encodings);
+    let mut decoded = [Point::IDENTITY; N];
+    decode_lanes::<C, N>(&group, &mut decoded)?;
+    output.copy_from_slice(&decoded[..encodings.len()]);
+    Some(())
+}
+
+// One full lane group. Any identity encoding or zero radicand routes the group
+// through the scalar decoder: sqrt's zero short-circuit never enters the lane
+// exponentiation, and such encodings are rare in honest batches.
+fn decode_lanes<C: PastaCurve, const N: usize>(
+    encodings: &[[u8; 32]; N],
+    output: &mut [Point<C>; N],
+) -> Option<()> {
+    let mut xs = [PastaField::ZERO; N];
+    let mut radicands = [PastaField::ZERO; N];
+    let mut odd = [false; N];
+    for lane in 0..N {
+        let mut bytes = encodings[lane];
+        if bytes == [0; 32] {
+            return decode_each(encodings, output);
+        }
+        odd[lane] = bytes[31] >> 7 != 0;
+        bytes[31] &= 0x7f;
+        xs[lane] = PastaField::from_bytes(bytes)?;
+        radicands[lane] = curve_rhs::<C>(&xs[lane]).reduce();
+        if radicands[lane].is_zero() {
+            return decode_each(encodings, output);
+        }
+    }
+    let roots = PastaField::sqrt_lanes(&radicands);
+    for lane in 0..N {
+        let mut y = roots[lane]?;
+        // Nonzero radicands have nonzero roots, so the zero-parity rejection in
+        // from_bytes cannot trigger; correcting the parity suffices.
+        if y.is_odd() != odd[lane] {
+            y = y.neg().reduce();
+        }
+        debug_assert_eq!(y.square().reduce(), radicands[lane]);
+        output[lane] = AffinePoint {
+            x: xs[lane],
+            y,
+            marker: core::marker::PhantomData,
+        }
+        .to_point();
+    }
+    Some(())
+}
+
+fn decode_each<C: PastaCurve, const N: usize>(
+    encodings: &[[u8; 32]; N],
+    output: &mut [Point<C>; N],
+) -> Option<()> {
+    for (encoding, output) in encodings.iter().zip(output.iter_mut()) {
+        *output = Point::from_bytes(*encoding)?;
+    }
+    Some(())
 }

@@ -89,8 +89,8 @@ pub(crate) struct VerifyingKey<C: CurveAffine> {
 }
 
 impl<C: CurveAffine> VerifyingKey<C> {
-    /// The commitments to the permutation columns (one per column), for Lean fixture export.
-    #[cfg(feature = "unstable-verifier-fingerprint")]
+    /// The commitments to the permutation columns (one per column).
+    #[cfg(any(feature = "batch", feature = "unstable-verifier-fingerprint"))]
     pub(crate) fn commitments(&self) -> &[C] {
         &self.commitments
     }

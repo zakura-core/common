@@ -10,6 +10,15 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-10
+
+### Added
+
+- Added `Point::batch_from_bytes`, decoding batches of compressed point
+  encodings with interleaved square-root chains while accepting and rejecting
+  exactly what `Point::from_bytes` does
+  ([#725](https://github.com/zakura-core/common/pull/725)).
+
 ## [0.2.0] - 2026-11-01
 
 ### Added

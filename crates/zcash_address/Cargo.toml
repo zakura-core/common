@@ -3,7 +3,6 @@ name = "zakura-address"
 description = "Zcash address parsing and serialization"
 version.workspace = true
 authors.workspace = true
-homepage = "https://github.com/zakura-core/common"
 repository.workspace = true
 readme.workspace = true
 license.workspace = true

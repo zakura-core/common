@@ -10,6 +10,14 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [5.4.0] - 2026-11-10
+
+### Changed
+
+- Sped up `Fp2` square roots, and therefore G2 point decompression, which
+  remains constant time
+  ([#723](https://github.com/zakura-core/common/pull/723)).
+
 ## [5.0.0] - 2026-11-02
 
 ### Changed

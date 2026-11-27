@@ -10,6 +10,12 @@ internal implementation details are not tracked here.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-10
+
+### Changed
+
+- Generate prover code against Sensei Shared 0.2.0 and its Udon 0.3.0 types.
+
 ## [0.1.0] - 2026-10-31
 
 ### Added

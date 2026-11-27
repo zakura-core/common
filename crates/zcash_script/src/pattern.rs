@@ -696,7 +696,7 @@ mod tests {
     #[cfg(feature = "signature-validation")]
     #[test]
     fn htlc_unconditional_branch_needs_the_sender_signature() {
-        use hex::FromHex;
+        use const_hex::FromHex;
 
         use crate::interpreter::Flags;
 

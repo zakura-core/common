@@ -6,6 +6,7 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(udon_aarch64_asm)");
     println!("cargo:rustc-check-cfg=cfg(udon_x86_64_asm)");
     println!("cargo:rustc-check-cfg=cfg(udon_asm)");
+    println!("cargo:rustc-check-cfg=cfg(udon_avx2)");
     println!("cargo:rerun-if-changed=src/asm/pasta_mul-armv8.S");
 
     let x86_64 = use_x86_64_asm();
@@ -18,6 +19,25 @@ fn main() {
     if x86_64 || aarch64 {
         println!("cargo:rustc-cfg=udon_asm");
     }
+    if use_avx2() {
+        println!("cargo:rustc-cfg=udon_avx2");
+    }
+}
+
+// Whether the four-lane AVX2 kernels are compiled: the target enables AVX2,
+// or the `x86_64-asm` feature forces the x86-64 backend, whose documented CPU
+// requirement includes AVX2. Selecting the assembly backend from ADX and
+// BMI2 target features alone does not imply AVX2, which such a target may
+// leave out or disable.
+fn use_avx2() -> bool {
+    if env::var("CARGO_CFG_TARGET_ARCH").as_deref() != Ok("x86_64")
+        || env::var("CARGO_CFG_TARGET_POINTER_WIDTH").as_deref() != Ok("64")
+        || cfg!(feature = "portable")
+    {
+        return false;
+    }
+    let target_features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+    cfg!(feature = "x86_64-asm") || target_features.split(',').any(|feature| feature == "avx2")
 }
 
 // Whether the x86-64 inline-assembly backend is selected for this build.

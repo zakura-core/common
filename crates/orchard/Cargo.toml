@@ -139,3 +139,8 @@ required-features = ["circuit-composition", "test-dependencies"]
 name = "binding_key"
 harness = false
 required-features = ["test-dependencies", "std"]
+
+[[bench]]
+name = "batch_validation"
+harness = false
+required-features = ["test-dependencies", "circuit", "multicore", "zip32-addresses"]

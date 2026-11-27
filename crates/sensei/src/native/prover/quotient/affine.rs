@@ -64,8 +64,9 @@ impl AffineRows {
             self.rows[0] = self.rows[1];
             self.rows[1] = self.rows[2];
         }
-        for r in if first { 0 } else { 2 }..3 {
-            for (c, result) in self.rows[r].iter_mut().enumerate() {
+        let start = if first { 0 } else { 2 };
+        for (r, row) in self.rows.iter_mut().enumerate().skip(start) {
+            for (c, result) in row.iter_mut().enumerate() {
                 let mut sum = <Fp>::ZERO;
                 for (action, weight) in weighted.iter().enumerate() {
                     sum = value(action, r, c).mul_add(weight, &sum);

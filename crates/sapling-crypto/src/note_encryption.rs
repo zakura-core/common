@@ -661,9 +661,9 @@ mod tests {
         // Find an invalid diversifier
         let mut d = Diversifier([0; 11]);
         loop {
-            for k in 0..11 {
-                d.0[k] = d.0[k].wrapping_add(1);
-                if d.0[k] != 0 {
+            for byte in d.0.iter_mut() {
+                *byte = byte.wrapping_add(1);
+                if *byte != 0 {
                     break;
                 }
             }
@@ -678,9 +678,9 @@ mod tests {
         // Find a different valid diversifier
         let mut d = Diversifier([0; 11]);
         loop {
-            for k in 0..11 {
-                d.0[k] = d.0[k].wrapping_add(1);
-                if d.0[k] != 0 {
+            for byte in d.0.iter_mut() {
+                *byte = byte.wrapping_add(1);
+                if *byte != 0 {
                     break;
                 }
             }
