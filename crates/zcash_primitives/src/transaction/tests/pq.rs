@@ -193,6 +193,10 @@ mod output_spends {
         input
     }
 
+    fn spend_null_fail() -> Result<bool, output::Error> {
+        null_fail().map_err(output::Error::Pq)
+    }
+
     fn check(
         tx: &TransactionData<TestUnauthorized>,
         body: &Code,
@@ -217,17 +221,17 @@ mod output_spends {
     }
 
     #[test]
-    fn serialized_multisig_authenticates_distinct_signers_and_order() {
+    fn serialized_threshold_authenticates_each_signer_in_its_own_slot() {
         let keys: Vec<_> = (3..=5)
             .map(|seed| SigningKey::from_seed(&[seed; crypto::SEED_BYTES]))
             .collect();
-        let body = multisig_program(
+        let body = threshold_program(
             2,
             &keys.iter().map(SigningKey::public_key).collect::<Vec<_>>(),
             false,
         );
         let mut tx = transaction(&body);
-        let arguments: Vec<_> = keys
+        let signatures: Vec<_> = keys
             .iter()
             .map(|key| {
                 let mut input =
@@ -236,26 +240,24 @@ mod output_spends {
                 input
             })
             .collect();
-        for pair in [[0, 1], [0, 2], [1, 2], [2, 0]] {
-            let input = [
-                vec![0],
-                arguments[pair[0]].clone(),
-                arguments[pair[1]].clone(),
-                pushed(&body.0),
-            ]
-            .concat();
-            install_input(&mut tx, &input);
-            assert_eq!(
-                check(&tx, &body),
-                Ok(pair != [2, 0]),
-                "signer order {pair:?}"
-            );
+        // The serialized signature pushes, unwrapped back into payloads for `slots`.
+        let payloads: Vec<Vec<u8>> = signatures.iter().map(|push| push[3..].to_vec()).collect();
+        for pair in [[0, 1], [0, 2], [1, 2]] {
+            let chosen: Vec<_> = (0..3)
+                .map(|index| pair.contains(&index).then(|| &payloads[index]))
+                .collect();
+            install_input(&mut tx, &[slots(&chosen), pushed(&body.0)].concat());
+            assert_eq!(check(&tx, &body), Ok(true), "signers {pair:?}");
         }
-        let mut forged = arguments[0].clone();
-        forged[3] ^= 1; // Alter signature payload after its PUSHDATA2 prefix.
-        let input = [vec![0], forged, arguments[2].clone(), pushed(&body.0)].concat();
-        install_input(&mut tx, &input);
-        assert_eq!(check(&tx, &body), Ok(false));
+        // A signature in another key's slot is a failed signature, not a skipped one.
+        let crossed = [Some(&payloads[1]), Some(&payloads[0]), None];
+        install_input(&mut tx, &[slots(&crossed), pushed(&body.0)].concat());
+        assert_eq!(check(&tx, &body), spend_null_fail());
+        let mut forged = payloads[0].clone();
+        forged[0] ^= 1;
+        let forged = [Some(&forged), None, Some(&payloads[2])];
+        install_input(&mut tx, &[slots(&forged), pushed(&body.0)].concat());
+        assert_eq!(check(&tx, &body), spend_null_fail());
     }
 
     #[test]
@@ -294,13 +296,13 @@ mod output_spends {
             let mut changed = transaction(&body);
             mutate(&mut changed);
             install_input(&mut changed, &input);
-            assert_eq!(check(&changed, &body), Ok(false));
+            assert_eq!(check(&changed, &body), spend_null_fail());
         }
 
         let mut forged = input.clone();
         forged[3] ^= 1;
         install_input(&mut tx, &forged);
-        assert_eq!(check(&tx, &body), Ok(false));
+        assert_eq!(check(&tx, &body), spend_null_fail());
 
         // Equivalent execution with different bytes still needs a different output/signature.
         let mut changed_body = vec![0x61]; // NOP
@@ -315,11 +317,11 @@ mod output_spends {
         );
         let mut changed_tx = transaction(&changed_body);
         install_input(&mut changed_tx, &substituted);
-        assert_eq!(check(&changed_tx, &changed_body), Ok(false));
+        assert_eq!(check(&changed_tx, &changed_body), spend_null_fail());
 
         let wrong_context = signed_input(&key, &tx, &body, sighash::SIGHASH_ALL, CONTEXT);
         install_input(&mut tx, &wrong_context);
-        assert_eq!(check(&tx, &body), Ok(false));
+        assert_eq!(check(&tx, &body), spend_null_fail());
     }
 
     #[test]
@@ -354,12 +356,20 @@ mod output_spends {
         assert_ne!(digest(&tx, sighash::SIGHASH_ALL), signed_digest);
         // The same commitment still authenticates the same script, because the commitment
         // covers the body alone. The output's scheme is what selects the rules, so this
-        // spend is now rejected for presenting a key of the wrong length for them.
+        // spend is now rejected: for a key of the wrong length for them, or, when the input
+        // is smaller than one of the other scheme's signatures, for not paying for the
+        // check at all, which is charged first.
+        let input_bytes = tx.transparent_bundle().unwrap().vin[0].script_sig().0.0.len();
+        let expected = if input_bytes < other.signature_bytes() {
+            InterpreterError::PqCheckBudget
+        } else {
+            InterpreterError::PubKeyType
+        };
         assert!(matches!(
             check(&tx, &body),
             Err(output::Error::Pq(pq_script::Error::Script(
-                script::Error::Interpreter(_, InterpreterError::PubKeyType)
-            )))
+                script::Error::Interpreter(_, error)
+            ))) if error == expected
         ));
     }
 
@@ -430,11 +440,11 @@ mod output_spends {
                 TxOut::new(Zatoshis::const_from_u64(89), Script(Code(vec![0x51])));
             assert_eq!(
                 check(&tx, &body),
-                Ok(selector & sighash::SIGHASH_MASK == sighash::SIGHASH_NONE)
+                if selector & sighash::SIGHASH_MASK == sighash::SIGHASH_NONE { Ok(true) } else { spend_null_fail() }
             );
             if selector & sighash::SIGHASH_MASK == sighash::SIGHASH_SINGLE {
                 tx.transparent_bundle.as_mut().unwrap().vout.clear();
-                assert_eq!(check(&tx, &body), Ok(false));
+                assert_eq!(check(&tx, &body), spend_null_fail());
             }
             tx.lock_time = 99;
             assert!(matches!(
@@ -468,7 +478,17 @@ fn check(
         lock_time: i64::from(tx.lock_time()),
         is_final: tx.transparent_bundle().unwrap().vin[0].sequence() == u32::MAX,
     };
-    pq::script::verify_script(PARAMETERS, input, code, context, &checker)
+    // Budgeted as the serialized input would be: these arguments, then the pushed program.
+    let input_bytes = input.len() + pushed(&code.0).len();
+    pq::script::verify_script(PARAMETERS, input, code, context, &checker, input_bytes)
+}
+
+/// What a non-empty signature that fails to verify does to a single-key spend.
+fn null_fail() -> Result<bool, pq_script::Error> {
+    Err(pq_script::Error::Script(script::Error::Interpreter(
+        Some(zcash_script::opcode::PossiblyBad::Good(zcash_script::op::CHECKSIG)),
+        InterpreterError::PqNullFail,
+    )))
 }
 
 fn signature(key: &SigningKey, tx: &TransactionData<TestUnauthorized>, selector: u8) -> Vec<u8> {
@@ -477,23 +497,30 @@ fn signature(key: &SigningKey, tx: &TransactionData<TestUnauthorized>, selector:
     signature
 }
 
-fn multisig_program(
+/// `<K1> CHECKSIG <K2> CHECKSIGADD ... <Kn> CHECKSIGADD <required> NUMEQUAL[VERIFY]`.
+fn threshold_program(
     required: u8,
     keys: &[[u8; crypto::PUBLIC_KEY_BYTES]],
     verify: bool,
 ) -> Code {
-    assert!((1..=20).contains(&required));
-    assert!((usize::from(required)..=20).contains(&keys.len()));
-    let mut bytes = pushed(&zcash_script::num::serialize(i64::from(required)));
-    for key in keys {
-        bytes.push(u8::try_from(key.len()).unwrap());
-        bytes.extend_from_slice(key);
+    let mut bytes = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        bytes.extend(pushed(key));
+        bytes.push(if index == 0 { 0xac } else { pq_script::OP_CHECKSIGADD });
     }
-    bytes.extend(pushed(&zcash_script::num::serialize(
-        i64::try_from(keys.len()).unwrap(),
-    )));
-    bytes.push(if verify { 0xaf } else { 0xae }); // CHECKMULTISIG[VERIFY]
+    bytes.extend(pushed(&zcash_script::num::serialize(i64::from(required))));
+    bytes.push(if verify { 0x9d } else { 0x9c }); // NUMEQUALVERIFY or NUMEQUAL
     Code(bytes)
+}
+
+/// The arguments [`threshold_program`] takes: a signature or an empty item for each key,
+/// the first key's on top of the stack.
+fn slots(signatures: &[Option<&Vec<u8>>]) -> Vec<u8> {
+    signatures
+        .iter()
+        .rev()
+        .flat_map(|signature| signature.map_or_else(|| vec![0], |signature| pushed(signature)))
+        .collect()
 }
 
 fn interpreter_error(result: Result<bool, pq_script::Error>) -> InterpreterError {
@@ -548,18 +575,18 @@ fn pq_script_executes_serialized_signature_over_real_v5_digest() {
         ))
     ));
 
-    assert_eq!(check(&tx, &input, &code, b"different context"), Ok(false));
+    assert_eq!(check(&tx, &input, &code, b"different context"), null_fail());
     assert_eq!(
         check(&tx, &input, &code, &[0; 256]),
         Err(pq_script::Error::ContextSize)
     );
     let other_key = SigningKey::from_seed(&[4; crypto::SEED_BYTES]).public_key();
-    assert_eq!(check(&tx, &input, &program(&other_key), CONTEXT), Ok(false));
+    assert_eq!(check(&tx, &input, &program(&other_key), CONTEXT), null_fail());
 
     for position in [0, 24, crypto::SIGNATURE_BYTES - 1] {
         let mut altered = argument.clone();
         altered[position] ^= 1;
-        assert_eq!(check(&tx, &pushed(&altered), &code, CONTEXT), Ok(false));
+        assert_eq!(check(&tx, &pushed(&altered), &code, CONTEXT), null_fail());
     }
     for mutate in [
         |tx: &mut TransactionData<TestUnauthorized>| tx.lock_time += 1,
@@ -590,7 +617,7 @@ fn pq_script_executes_serialized_signature_over_real_v5_digest() {
     ] {
         let mut changed = transaction(&public_key);
         mutate(&mut changed);
-        assert_eq!(check(&changed, &input, &code, CONTEXT), Ok(false));
+        assert_eq!(check(&changed, &input, &code, CONTEXT), null_fail());
     }
 }
 
@@ -624,15 +651,21 @@ fn pq_script_preserves_false_and_abort() {
             )))
         ));
     }
-    for short in [&argument[..1], &argument[..crypto::SIGNATURE_BYTES]] {
-        assert!(matches!(
-            check(&tx, &pushed(short), &code, CONTEXT),
-            Err(pq_script::Error::Script(script::Error::Interpreter(
-                _,
-                InterpreterError::PqSignatureSize
-            )))
-        ));
-    }
+    assert_eq!(
+        interpreter_error(check(
+            &tx,
+            &pushed(&argument[..crypto::SIGNATURE_BYTES]),
+            &code,
+            CONTEXT
+        )),
+        InterpreterError::PqSignatureSize
+    );
+    // A check is charged before its signature is examined, so an input too small to pay
+    // for one is refused for that first. Either way nothing is verified.
+    assert_eq!(
+        interpreter_error(check(&tx, &pushed(&argument[..1]), &code, CONTEXT)),
+        InterpreterError::PqCheckBudget
+    );
     let mut extended = argument.clone();
     extended.push(0);
     let result = check(&tx, &pushed(&extended), &code, CONTEXT);
@@ -647,82 +680,89 @@ fn pq_script_preserves_false_and_abort() {
     *bad_selector.last_mut().unwrap() = sighash::SIGHASH_NONE;
     assert_eq!(
         check(&tx, &pushed(&bad_selector), &code, CONTEXT),
-        Ok(false)
+        null_fail()
     );
 }
 
-#[test]
-fn pq_script_multisig_one_of_one_checks_signatures_and_consumes_dummy() {
-    let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
-    for verify in [false, true] {
-        let mut code = multisig_program(1, &[key.public_key()], verify);
-        if verify {
-            // DEPTH 0 EQUAL: VERIFY must consume everything, including the dummy.
-            code.0.extend_from_slice(&[0x74, 0x00, 0x87]);
-        } else {
-            // DEPTH 1 EQUALVERIFY: only the signature-check result may remain.
-            code.0.extend_from_slice(&[0x74, 0x51, 0x88]);
+fn threshold_error(result: Result<bool, pq_script::Error>, opcode: u8) -> InterpreterError {
+    match result {
+        Err(pq_script::Error::Script(script::Error::Interpreter(Some(op), error))) => {
+            assert_eq!(Vec::<u8>::from(&op), vec![opcode]);
+            error
         }
-        let tx = transaction_with_program(&code);
-        let argument = signature(&key, &tx, sighash::SIGHASH_ALL);
-        let mut input = vec![0];
-        input.extend_from_slice(&pushed(&argument));
-        assert_eq!(check(&tx, &input, &code, CONTEXT), Ok(true));
-
-        // The dummy CHECKMULTISIG consumes without examining has to be empty. It is
-        // otherwise a third party's free edit to this spend: the item never reaches the
-        // final stack, and shortest-form pushes do not constrain it, so without the rule
-        // the spend would stay valid at any size.
-        input[0] = 0x51;
-        assert_eq!(
-            interpreter_error(check(&tx, &input, &code, CONTEXT)),
-            InterpreterError::SigNullDummy
-        );
-        assert!(matches!(
-            interpreter_error(check(&tx, &pushed(&argument), &code, CONTEXT)),
-            InterpreterError::InvalidStackOperation(_)
-        ));
-
-        let mut altered = argument;
-        altered[0] ^= 1;
-        let mut forged = vec![0];
-        forged.extend_from_slice(&pushed(&altered));
-        for invalid_input in [&forged[..], &[0, 0][..]] {
-            let result = check(&tx, invalid_input, &code, CONTEXT);
-            if verify {
-                assert_eq!(interpreter_error(result), InterpreterError::Verify);
-            } else {
-                assert_eq!(result, Ok(false));
-            }
-        }
+        other => panic!("expected an interpreter error, got {other:?}"),
     }
 }
 
 #[test]
-fn pq_script_multisig_one_of_two_searches_past_failed_matches() {
-    let alice = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
-    let bob = SigningKey::from_seed(&[4; crypto::SEED_BYTES]);
-    let code = multisig_program(1, &[alice.public_key(), bob.public_key()], false);
-    let tx = transaction_with_program(&code);
-
-    // Keys are searched from the top of the stack, so Bob matches on the first attempt.
-    let mut input = vec![0];
-    input.extend_from_slice(&pushed(&signature(&bob, &tx, sighash::SIGHASH_ALL)));
-    assert_eq!(check(&tx, &input, &code, CONTEXT), Ok(true));
-
-    // Reaching Alice requires a failed match against Bob first.
-    let mut input = vec![0];
-    input.extend_from_slice(&pushed(&signature(&alice, &tx, sighash::SIGHASH_ALL)));
-    assert_eq!(check(&tx, &input, &code, CONTEXT), Ok(true));
+fn pq_script_one_of_one_threshold_takes_a_signature_or_an_empty_item() {
+    let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
+    for verify in [false, true] {
+        let mut code = threshold_program(1, &[key.public_key()], verify);
+        if verify {
+            code.0.push(0x51);
+        }
+        let tx = transaction_with_program(&code);
+        let argument = signature(&key, &tx, sighash::SIGHASH_ALL);
+        assert_eq!(
+            check(&tx, &slots(&[Some(&argument)]), &code, CONTEXT),
+            Ok(true)
+        );
+        // Declining is an empty item, which fails the threshold, not the signature.
+        let declined = check(&tx, &slots(&[None]), &code, CONTEXT);
+        if verify {
+            assert_eq!(threshold_error(declined, 0x9d), InterpreterError::Verify);
+        } else {
+            assert_eq!(declined, Ok(false));
+        }
+        // No dummy argument any more: an extra item is left on the stack and refused.
+        assert_eq!(
+            check(&tx, &[vec![0], pushed(&argument)].concat(), &code, CONTEXT),
+            Err(pq_script::Error::Script(script::Error::CleanStack))
+        );
+        let mut altered = argument;
+        altered[0] ^= 1;
+        assert_eq!(
+            check(&tx, &slots(&[Some(&altered)]), &code, CONTEXT),
+            null_fail()
+        );
+    }
 }
 
 #[test]
-fn pq_script_multisig_two_of_three_accepts_each_pair_and_rejects_wrong_order() {
+fn pq_script_one_of_two_checks_only_the_signer() {
+    let alice = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
+    let bob = SigningKey::from_seed(&[4; crypto::SEED_BYTES]);
+    let code = threshold_program(1, &[alice.public_key(), bob.public_key()], false);
+    let tx = transaction_with_program(&code);
+    let alice_signature = signature(&alice, &tx, sighash::SIGHASH_ALL);
+    let bob_signature = signature(&bob, &tx, sighash::SIGHASH_ALL);
+    // Either key alone, with an empty item in the other's slot: one check, never a trial.
+    for chosen in [[Some(&alice_signature), None], [None, Some(&bob_signature)]] {
+        assert_eq!(check(&tx, &slots(&chosen), &code, CONTEXT), Ok(true));
+    }
+    // Both signing is a valid count of two, which a one-of-two does not accept.
+    assert_eq!(
+        check(
+            &tx,
+            &slots(&[Some(&alice_signature), Some(&bob_signature)]),
+            &code,
+            CONTEXT
+        ),
+        Ok(false)
+    );
+    // Bob's signature in Alice's slot fails, where CHECKMULTISIG would have moved on.
+    let crossed = check(&tx, &slots(&[Some(&bob_signature), None]), &code, CONTEXT);
+    assert_eq!(crossed, null_fail());
+}
+
+#[test]
+fn pq_script_two_of_three_accepts_each_pair_and_rejects_misplaced_signatures() {
     let keys: Vec<_> = (3..=5)
         .map(|seed| SigningKey::from_seed(&[seed; crypto::SEED_BYTES]))
         .collect();
     for verify in [false, true] {
-        let mut code = multisig_program(
+        let mut code = threshold_program(
             2,
             &keys.iter().map(SigningKey::public_key).collect::<Vec<_>>(),
             verify,
@@ -736,36 +776,28 @@ fn pq_script_multisig_two_of_three_accepts_each_pair_and_rejects_wrong_order() {
             .map(|key| signature(key, &tx, sighash::SIGHASH_ALL))
             .collect();
         for pair in [[0, 1], [0, 2], [1, 2]] {
-            let input = [
-                vec![0],
-                pushed(&arguments[pair[0]]),
-                pushed(&arguments[pair[1]]),
-            ]
-            .concat();
+            let chosen: Vec<_> = (0..3)
+                .map(|index| pair.contains(&index).then(|| &arguments[index]))
+                .collect();
             assert_eq!(
-                check(&tx, &input, &code, CONTEXT),
+                check(&tx, &slots(&chosen), &code, CONTEXT),
                 Ok(true),
                 "pair {pair:?}"
             );
         }
-        let reversed = [vec![0], pushed(&arguments[2]), pushed(&arguments[0])].concat();
-        let forged = [
-            vec![0],
-            pushed(&vec![0; crypto::SIGNATURE_BYTES + 1]),
-            pushed(&arguments[2]),
-        ]
-        .concat();
-        // Use a valid selector for the cryptographically invalid signature.
-        let mut forged = forged;
-        forged[3 + crypto::SIGNATURE_BYTES + 1] = sighash::SIGHASH_ALL;
-        for input in [reversed, forged] {
-            let result = check(&tx, &input, &code, CONTEXT);
-            if verify {
-                assert_eq!(interpreter_error(result), InterpreterError::Verify);
-            } else {
-                assert_eq!(result, Ok(false));
-            }
-        }
+        // The first and third signatures in each other's slots.
+        let swapped = [Some(&arguments[2]), None, Some(&arguments[0])];
+        assert_eq!(check(&tx, &slots(&swapped), &code, CONTEXT), null_fail());
+        let mut forged = vec![0; crypto::SIGNATURE_BYTES];
+        forged.push(sighash::SIGHASH_ALL);
+        let with_forgery = [None, Some(&forged), Some(&arguments[2])];
+        assert_eq!(
+            threshold_error(
+                check(&tx, &slots(&with_forgery), &code, CONTEXT),
+                pq_script::OP_CHECKSIGADD
+            ),
+            InterpreterError::PqNullFail
+        );
         assert!(
             check(&tx, &[0, 0], &code, CONTEXT).is_err(),
             "insufficient stack arguments abort"
@@ -774,41 +806,38 @@ fn pq_script_multisig_two_of_three_accepts_each_pair_and_rejects_wrong_order() {
 }
 
 #[test]
-fn pq_script_large_multisig_and_multiple_checks_fit_bounded_resources() {
+fn pq_script_large_thresholds_and_multiple_checks_fit_bounded_resources() {
     let key = SigningKey::from_seed(&[3; crypto::SEED_BYTES]);
-    // Duplicate keys remain legal, as in legacy Script. This fixture measures
-    // signature transport and twenty verifications, not distinct ownership.
-    let code = multisig_program(20, &[key.public_key(); 20], false);
+    // Past CHECKMULTISIG's twenty keys. Duplicate keys remain legal, as in legacy Script;
+    // this fixture measures signature transport and verifications, not ownership.
+    let keys = 25;
+    let code = threshold_program(keys, &vec![key.public_key(); usize::from(keys)], false);
     let tx = transaction_with_program(&code);
     let argument = signature(&key, &tx, sighash::SIGHASH_ALL);
-    let mut input = vec![0];
-    for _ in 0..20 {
-        input.extend(pushed(&argument));
-    }
+    let input = slots(&vec![Some(&argument); usize::from(keys)]);
     let start = std::time::Instant::now();
     assert_eq!(check(&tx, &input, &code, CONTEXT), Ok(true));
     std::eprintln!(
-        "20-of-20: input={} bytes, initial signature payload={} bytes, verification={:?}",
+        "{keys}-of-{keys}: input={} bytes, verification={:?}",
         input.len(),
-        20 * argument.len(),
         start.elapsed()
     );
 
-    // Nineteen failed matches before reaching the sole matching key.
+    // One signer among twenty keys: nineteen empty slots, one check.
     let mut wrong = key.public_key();
     wrong[0] ^= 1;
     let mut public_keys = vec![key.public_key()];
     public_keys.extend([wrong; 19]);
-    let code = multisig_program(1, &public_keys, false);
+    let code = threshold_program(1, &public_keys, false);
     let tx = transaction_with_program(&code);
-    let input = [vec![0], pushed(&signature(&key, &tx, sighash::SIGHASH_ALL))].concat();
+    let argument = signature(&key, &tx, sighash::SIGHASH_ALL);
+    let mut chosen = vec![None; 20];
+    chosen[0] = Some(&argument);
     let start = std::time::Instant::now();
-    assert_eq!(check(&tx, &input, &code, CONTEXT), Ok(true));
-    std::eprintln!(
-        "1-of-20 with nineteen missed matches: {:?}",
-        start.elapsed()
-    );
+    assert_eq!(check(&tx, &slots(&chosen), &code, CONTEXT), Ok(true));
+    std::eprintln!("1-of-20 with nineteen declined slots: {:?}", start.elapsed());
 
+    // Two checks of one signature need two copies of it in the input, each paying.
     let mut code = program(&key.public_key());
     *code.0.last_mut().unwrap() = 0xad; // CHECKSIGVERIFY
     code.0.extend(program(&key.public_key()).0);
@@ -822,6 +851,16 @@ fn pq_script_large_multisig_and_multiple_checks_fit_bounded_resources() {
             CONTEXT
         ),
         Ok(true)
+    );
+    // And one copy checked twice is over budget.
+    let mut copied = vec![0x76]; // DUP
+    copied.extend(&code.0);
+    let copied = Code(copied);
+    let tx = transaction_with_program(&copied);
+    let argument = signature(&key, &tx, sighash::SIGHASH_ALL);
+    assert_eq!(
+        threshold_error(check(&tx, &pushed(&argument), &copied, CONTEXT), 0xac),
+        InterpreterError::PqCheckBudget
     );
 }
 
@@ -877,7 +916,7 @@ fn pq_script_recovery_branch_requires_its_key_and_absolute_locktime() {
     let cosigner = SigningKey::from_seed(&[5; crypto::SEED_BYTES]);
     let mut bytes = vec![0x63]; // IF: owner and cosigner may spend before recovery.
     bytes.extend_from_slice(
-        &multisig_program(2, &[owner.public_key(), cosigner.public_key()], false).0,
+        &threshold_program(2, &[owner.public_key(), cosigner.public_key()], false).0,
     );
     bytes.push(0x67); // ELSE
     bytes.extend_from_slice(&pushed(&[100]));
@@ -895,23 +934,14 @@ fn pq_script_recovery_branch_requires_its_key_and_absolute_locktime() {
         let cosigner_signature = signature(&cosigner, &tx, sighash::SIGHASH_ALL);
         let recovery_signature = signature(&recovery, &tx, sighash::SIGHASH_ALL);
 
-        let mut input = [
-            vec![0],
-            pushed(&owner_signature),
-            pushed(&cosigner_signature),
-        ]
-        .concat();
+        let mut input = slots(&[Some(&owner_signature), Some(&cosigner_signature)]);
         input.push(0x51);
         assert_eq!(check(&tx, &input, &code, CONTEXT), Ok(true));
 
-        let mut input = [
-            vec![0],
-            pushed(&recovery_signature),
-            pushed(&cosigner_signature),
-        ]
-        .concat();
+        // The recovery key's signature in the owner's slot is a failed signature.
+        let mut input = slots(&[Some(&recovery_signature), Some(&cosigner_signature)]);
         input.push(0x51);
-        assert_eq!(check(&tx, &input, &code, CONTEXT), Ok(false));
+        assert_eq!(check(&tx, &input, &code, CONTEXT), null_fail());
 
         for (argument, succeeds) in [(&owner_signature, false), (&recovery_signature, true)] {
             let mut input = pushed(argument);
@@ -922,8 +952,10 @@ fn pq_script_recovery_branch_requires_its_key_and_absolute_locktime() {
                     interpreter_error(result),
                     InterpreterError::UnsatisfiedLockTime
                 );
+            } else if succeeds {
+                assert_eq!(result, Ok(true));
             } else {
-                assert_eq!(result, Ok(succeeds));
+                assert_eq!(result, null_fail());
             }
         }
     }
@@ -978,11 +1010,11 @@ fn pq_script_accepts_existing_signing_modes_without_an_all_only_rule() {
             TxOut::new(Zatoshis::const_from_u64(89), Script(Code(vec![0x51])));
         assert_eq!(
             check(&changed, &input, &code, CONTEXT),
-            Ok(selector & 0x1f == 2)
+            if selector & 0x1f == 2 { Ok(true) } else { null_fail() }
         );
         if selector & 0x1f == 3 {
             changed.transparent_bundle.as_mut().unwrap().vout.clear();
-            assert_eq!(check(&changed, &input, &code, CONTEXT), Ok(false));
+            assert_eq!(check(&changed, &input, &code, CONTEXT), null_fail());
         }
     }
 }

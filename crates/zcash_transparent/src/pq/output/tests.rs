@@ -108,20 +108,29 @@ fn schemes_bind_parameters_context_and_exact_encodings() {
         let selected = parsed.authenticate_spend(&serialized).unwrap();
         assert_eq!(selected.parameters(), set);
         assert_eq!(selected.body(), body.0);
-        assert_eq!(selected.sig_op_count(true), 1);
+        assert_eq!(selected.sig_op_count(), 1);
         assert_eq!(verify(NETWORK, set, &body, &[], &checker), Ok(false));
         assert!(verify(NETWORK, set, &body, &signatures[other].1, &checker).is_err());
+        // A signature that does not verify fails the spend; only an empty one is false.
+        let null_fail = Err(Error::Pq(zcash_script::pq::Error::Script(
+            zcash_script::script::Error::Interpreter(
+                Some(zcash_script::opcode::PossiblyBad::Good(
+                    zcash_script::op::CHECKSIG,
+                )),
+                zcash_script::interpreter::Error::PqNullFail,
+            ),
+        )));
         let (_, wrong_context) = signed(set, b"wrong-protocol-context");
         assert_eq!(
             verify(NETWORK, set, &body, &wrong_context, &checker),
-            Ok(false)
+            null_fail
         );
         // The context binds the network, which no transaction digest separates.
         for network in [NetworkType::Test, NetworkType::Regtest] {
             assert_ne!(signing_context(network, set), signing_context(NETWORK, set));
             assert_eq!(
                 verify(network, set, &body, signature, &checker),
-                Ok(false),
+                null_fail,
                 "a signature for one network must not verify on another"
             );
         }

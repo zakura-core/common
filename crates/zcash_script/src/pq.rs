@@ -9,22 +9,55 @@
 //! opcode parser and shared execution loop. These provisional harness limits are not proposed
 //! consensus limits; transaction/block work and relay qualification remain separate.
 //!
-//! Unlike the legacy evaluator, this one requires a canonical input: every pushed item uses
-//! its shortest encoding, the argument `CHECKMULTISIG` consumes without examining must be
-//! empty, and execution must end with exactly one item on the stack. All three deny a third
-//! party cheap, identifier-preserving edits to someone else's spend, because ZIP 244 leaves
-//! the serialized input out of the transaction identifier.
+//! Unlike the legacy evaluator, this one requires a canonical input, because ZIP 244 leaves
+//! the serialized input out of the transaction identifier and a third party could otherwise
+//! edit someone else's spend and keep it valid:
+//!
+//! - every item the input pushes, and every push the script executes, uses its shortest
+//!   encoding;
+//! - every item read as a number is minimally encoded, so `1` has one spelling;
+//! - `IF` and `NOTIF` take only an empty item or `0x01`, so a true `OP_1` cannot become
+//!   `OP_2`, nor a false `OP_0` a pushed `0x00` or `0x80` (Bitcoin's `MINIMALIF`);
+//! - execution ends with exactly one item on the stack.
+//!
+//! An item a script reads only for its truth elsewhere, through `VERIFY`, `IFDUP` or as the
+//! final result, is not constrained; a script that takes such an item from its input
+//! accepts every value of the same truth.
+//!
+//! The signature checks a spend may run are bounded by its size. A legacy script can check
+//! one signature many times, by copying it or through the key trials of `CHECKMULTISIG`,
+//! so the number of checks a block demands is not bounded by how many signatures fit in it.
+//! Here:
+//!
+//! - `CHECKMULTISIG` and `CHECKMULTISIGVERIFY` are invalid wherever they appear, and
+//!   `CHECKSIGADD` (`0xba`, from Bitcoin's BIP 342) replaces them. A k-of-n gives every key
+//!   its own slot, and each slot holds a signature or an empty item, so it runs exactly k
+//!   checks for k signatures.
+//! - A non-empty signature that fails makes the spend invalid; only an empty one is false.
+//! - Every check run with a non-empty signature costs [`CheckBudget`]'s per-check bytes, one
+//!   signature's worth, and a spend whose checks cost more than its input is invalid. An
+//!   honest check is paid for by its own signature; a copy is a check with no bytes behind
+//!   it. So a block can never demand more checks than its size divided by the signature
+//!   size, however its scripts are written.
 
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use crate::{
+    Opcode,
     interpreter::{self, Flags, SignatureChecker, Stack},
-    script,
+    num,
+    opcode::{self, Bad, Control, Evaluable as _, Operation, PossiblyBad, PushValue},
+    script, signature,
 };
 
+/// `OP_CHECKSIGADD`, which only PQ scripts define. Legacy scripts decode it as an unknown
+/// opcode, which fails when executed.
+pub const OP_CHECKSIGADD: u8 = 0xba;
+
 /// Provisional serialized authorization bound, including every push and the final
-/// pushed script. Accommodates 20 full signatures and multiple checking instructions;
-/// it is a byte bound, not a signature-count limit or a final consensus parameter.
+/// pushed script. Room for about thirty full signatures, so it also caps a threshold
+/// spend at about thirty signers; it is a byte bound, not a final consensus parameter.
 pub const MAX_INPUT_BYTES: usize = 512 * 1024;
 /// One SLH-DSA-SHA2-128f signature and its one-byte signing-mode selector.
 pub const MAX_PUSH_BYTES: usize = 17_089;
@@ -60,6 +93,226 @@ pub enum Error {
     /// Existing script parsing or execution rules rejected the spending program.
     #[error("spending script failed: {0}")]
     Script(#[from] script::Error),
+}
+
+/// The signature checks a spend may run: its input's bytes, one signature's worth per check.
+///
+/// Only checks given a non-empty signature are charged; an empty one runs no cryptography.
+/// The input is the whole serialized spending input, including the revealed script, so a
+/// spend can raise its budget only by carrying bytes, at the same rate a real signature
+/// would. That is what bounds a block's checks by its size, whatever its scripts do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CheckBudget {
+    max_checks: usize,
+}
+
+impl CheckBudget {
+    /// The budget of an input of `input_bytes`, where each check costs `signature_bytes`.
+    pub const fn new(input_bytes: usize, signature_bytes: core::num::NonZeroUsize) -> Self {
+        Self {
+            max_checks: input_bytes / signature_bytes.get(),
+        }
+    }
+
+    /// The most checks with a non-empty signature a spend under this budget may run.
+    pub const fn max_checks(&self) -> usize {
+        self.max_checks
+    }
+}
+
+/// Wraps the caller's checker with the PQ rules every checking opcode shares: a non-empty
+/// signature is charged to the budget before any cryptography runs, and must then be valid.
+struct Budgeted<'a> {
+    inner: &'a dyn SignatureChecker,
+    remaining: Cell<usize>,
+}
+
+impl SignatureChecker for Budgeted<'_> {
+    fn check_signature(
+        &self,
+        signature: &[u8],
+        public_key: &[u8],
+        flags: Flags,
+        script_code: &script::Code,
+    ) -> Result<bool, interpreter::Error> {
+        if signature.is_empty() {
+            // Free, and false: an empty item is how a key declines to sign. The inner
+            // checker still sees it, so a malformed key aborts whether or not it signed.
+            return self
+                .inner
+                .check_signature(signature, public_key, flags, script_code)
+                .map(|_| false);
+        }
+        // Charge first, so a check over budget never reaches the cryptography.
+        let remaining = self
+            .remaining
+            .get()
+            .checked_sub(1)
+            .ok_or(interpreter::Error::PqCheckBudget)?;
+        self.remaining.set(remaining);
+        if self
+            .inner
+            .check_signature(signature, public_key, flags, script_code)?
+        {
+            Ok(true)
+        } else {
+            Err(interpreter::Error::PqNullFail)
+        }
+    }
+
+    /// Never true: every check must pass through [`Self::check_signature`] to be charged,
+    /// so a path that reached this one directly would fail rather than check for free.
+    fn check_sig(&self, _: &signature::Decoded, _: &[u8], _: &script::Code) -> bool {
+        false
+    }
+
+    fn check_lock_time(&self, lock_time: i64) -> bool {
+        self.inner.check_lock_time(lock_time)
+    }
+}
+
+/// An instruction of a PQ script: a shared opcode, or one only PQ scripts define.
+///
+/// Mapping at parse time leaves the shared evaluation loop, opcode tables and legacy
+/// decoding untouched: `0xba` stays an unknown opcode everywhere else.
+#[derive(Clone)]
+enum Instruction {
+    Shared(PossiblyBad),
+    CheckSigAdd,
+}
+
+impl From<Instruction> for PossiblyBad {
+    fn from(instruction: Instruction) -> Self {
+        match instruction {
+            Instruction::Shared(op) => op,
+            Instruction::CheckSigAdd => PossiblyBad::Bad(Bad::Unknown(OP_CHECKSIGADD)),
+        }
+    }
+}
+
+impl opcode::Evaluable for Instruction {
+    fn byte_len(&self) -> usize {
+        match self {
+            Self::Shared(op) => op.byte_len(),
+            Self::CheckSigAdd => 1,
+        }
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Shared(op) => op.to_bytes(),
+            Self::CheckSigAdd => alloc::vec![OP_CHECKSIGADD],
+        }
+    }
+
+    /// Multisig is refused here, so wherever it appears, executed or not, as a disabled
+    /// opcode is.
+    fn restrict(op: PossiblyBad) -> Result<Self, script::Error> {
+        match op {
+            PossiblyBad::Bad(Bad::Unknown(OP_CHECKSIGADD)) => Ok(Self::CheckSigAdd),
+            PossiblyBad::Good(Opcode::Operation(
+                Operation::OP_CHECKMULTISIG | Operation::OP_CHECKMULTISIGVERIFY,
+            )) => Err(script::Error::Interpreter(
+                Some(op),
+                interpreter::Error::PqMultisig,
+            )),
+            op => Ok(Self::Shared(op)),
+        }
+    }
+
+    fn eval(
+        &self,
+        flags: Flags,
+        script: &script::Code,
+        checker: &dyn SignatureChecker,
+        mut state: interpreter::State,
+    ) -> Result<interpreter::State, interpreter::Error> {
+        match self {
+            Self::Shared(
+                op @ PossiblyBad::Good(Opcode::Control(Control::OP_IF | Control::OP_NOTIF)),
+            ) => {
+                // Only an executed IF reads its argument; a missing one is the shared
+                // evaluator's error to report.
+                if interpreter::should_exec(&state.vexec)
+                    && state
+                        .stack
+                        .rget(0)
+                        .is_ok_and(|argument| !matches!(argument.as_slice(), [] | [1]))
+                {
+                    return Err(interpreter::Error::PqMinimalIf);
+                }
+                op.eval(flags, script, checker, state)
+            }
+            Self::Shared(op) => op.eval(flags, script, checker, state),
+            Self::CheckSigAdd => {
+                // An operation like any other, counted whether or not its branch executes.
+                state.increment_op_count(1)?;
+                if interpreter::should_exec(&state.vexec) {
+                    check_sig_add(flags, script, checker, &mut state.stack)?;
+                }
+                Ok(state)
+            }
+        }
+    }
+
+    fn extract_push_value(&self) -> Result<&PushValue, script::Error> {
+        match self {
+            Self::Shared(op) => op.extract_push_value(),
+            Self::CheckSigAdd => Err(script::Error::Interpreter(
+                Some(self.clone().into()),
+                interpreter::Error::BadOpcode,
+            )),
+        }
+    }
+
+    fn sig_op_count(&self, last_opcode: Option<PossiblyBad>) -> u32 {
+        match self {
+            Self::Shared(op) => op.sig_op_count(last_opcode),
+            Self::CheckSigAdd => 1,
+        }
+    }
+}
+
+/// `(sig n pubkey -- n')`: checks `sig` against `pubkey` and adds one to `n` when it signed.
+///
+/// An empty `sig` leaves `n` unchanged and runs no cryptography. A non-empty one has to be
+/// valid, as [`Budgeted`] enforces, so the count it returns is exactly the number of
+/// signatures supplied. `n` is a number of at most four bytes, as for any arithmetic.
+fn check_sig_add(
+    flags: Flags,
+    script: &script::Code,
+    checker: &dyn SignatureChecker,
+    stack: &mut Stack<Vec<u8>>,
+) -> Result<(), interpreter::Error> {
+    stack.check_len(3)?;
+    let public_key = stack.pop()?;
+    let count = num::parse(&stack.pop()?, flags.contains(Flags::MinimalData), None)?;
+    let signature = stack.pop()?;
+    let signed = checker.check_signature(&signature, &public_key, flags, script)?;
+    stack.push(num::serialize(count + i64::from(signed)));
+    Ok(())
+}
+
+/// Counts the signature checks a PQ script can run: every `CHECKSIG`, `CHECKSIGVERIFY` and
+/// `CHECKSIGADD`, in every branch.
+///
+/// Scripts have no loops and these scripts have no multisig, so each of these opcodes runs at
+/// most once and this is an upper bound, not an estimate. The legacy counter reads `0xba` as
+/// an unknown opcode and counts nothing for it, so it must not be used for a PQ script.
+/// Counting stops where parsing does; such a script cannot be spent.
+pub fn signature_check_count(program: &script::Code) -> u32 {
+    let mut count = 0;
+    for instruction in program.parse() {
+        match instruction {
+            Ok(PossiblyBad::Good(Opcode::Operation(
+                Operation::OP_CHECKSIG | Operation::OP_CHECKSIGVERIFY,
+            )))
+            | Ok(PossiblyBad::Bad(Bad::Unknown(OP_CHECKSIGADD))) => count += 1,
+            Ok(_) | Err(opcode::Error::Disabled(_)) => {}
+            Err(opcode::Error::Read { .. } | opcode::Error::PushSize(_)) => break,
+        }
+    }
+    count
 }
 
 // Large pushes borrow their payload; small integer opcodes store one decoded byte.
@@ -161,6 +414,7 @@ pub struct SpendingInput<'a> {
     arguments: &'a [u8],
     redeem_script: PushedValue<'a>,
     pushes: usize,
+    len: usize,
 }
 
 impl<'a> SpendingInput<'a> {
@@ -184,7 +438,14 @@ impl<'a> SpendingInput<'a> {
             arguments,
             redeem_script,
             pushes,
+            len: input.len(),
         })
+    }
+
+    /// The whole serialized input's length, revealed script included: what a
+    /// [`CheckBudget`] for this spend is made from.
+    pub fn input_bytes(&self) -> usize {
+        self.len
     }
 
     /// Returns the final pushed item, the script the output commits to.
@@ -214,15 +475,20 @@ impl<'a> SpendingInput<'a> {
 ///
 /// The caller selects the verifier; no script bytes can select or downgrade it.
 /// This executes the supplied program directly, without an outer P2SH evaluation.
-/// A false final stack item returns `Ok(false)`; parsing/encoding errors and failed
-/// VERIFY operations abort. Unlike the legacy evaluator, a final stack holding anything
-/// other than exactly one item aborts, so leftover or prepended arguments are rejected
-/// rather than ignored. Non-minimal pushes in the input abort before execution.
-/// Absolute locktime checks use the caller's checker. No relay-policy flags are added.
+/// A false final stack item returns `Ok(false)`; parsing/encoding errors, failed VERIFY
+/// operations, a failed non-empty signature and a check over `budget` abort. Unlike the
+/// legacy evaluator, a final stack holding anything other than exactly one item aborts, so
+/// leftover or prepended arguments are rejected rather than ignored. Non-minimal pushes in
+/// the input abort before execution. Absolute locktimes use the caller's checker. No
+/// relay-policy flags are added.
+///
+/// `budget` should come from the whole serialized input, which `input` here (the arguments
+/// alone) is not; see [`SpendingInput::input_bytes`].
 pub fn eval_script(
     input: &[u8],
     program: &script::Code,
     checker: &dyn SignatureChecker,
+    budget: CheckBudget,
 ) -> Result<bool, Error> {
     // Bound both byte streams before allocating argument values or executing anything.
     if input.len() > MAX_INPUT_BYTES {
@@ -231,21 +497,23 @@ pub fn eval_script(
     if program.0.len() > script::Code::MAX_SIZE {
         return Err(script::Error::ScriptSize(Some(program.0.len())).into());
     }
+    let checker = Budgeted {
+        inner: checker,
+        remaining: Cell::new(budget.max_checks()),
+    };
     let stack = script::iter::eval(
-        program
-            .parse()
-            .map(|instruction| instruction.map_err(script::Error::Opcode)),
-        // Locktimes have to mean what they say, and the argument `CHECKMULTISIG` consumes
-        // without examining has to be empty. Requiring shortest-form pushes does not reach
-        // that argument, because every padding it would admit is itself the shortest
-        // encoding of its own payload; without this rule a third party could inflate
-        // someone else's multisig spend and leave it valid. Every other legacy flag is
-        // either specific to ECDSA, relay policy, or a rule this evaluator already applies
-        // unconditionally.
-        Flags::CHECKLOCKTIMEVERIFY | Flags::NullDummy,
+        program.parse().map(|instruction| {
+            instruction
+                .map_err(script::Error::Opcode)
+                .and_then(Instruction::restrict)
+        }),
+        // Locktimes have to mean what they say, and numbers and the script's own pushes
+        // have one encoding each. Every other legacy flag is either specific to ECDSA or
+        // multisig, relay policy, or a rule this evaluator already applies unconditionally.
+        Flags::CHECKLOCKTIMEVERIFY | Flags::MinimalData,
         program,
         arguments(input)?,
-        checker,
+        &checker,
         script::iter::AdditionalStackByteLimit::Limited(MAX_STACK_BYTES),
     )?;
     // Exactly one item, so neither an extra argument nor an unconsumed result can be
@@ -259,9 +527,15 @@ pub fn eval_script(
 }
 
 #[cfg(test)]
+mod check_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::interpreter::NullSignatureChecker;
+
+    /// No check with a non-empty signature may run.
+    const NO_CHECKS: CheckBudget = CheckBudget::new(0, core::num::NonZeroUsize::MIN);
 
     /// The shortest encoding of a `length`-byte payload, as the PQ rules require.
     fn push(length: usize) -> Vec<u8> {
@@ -333,7 +607,8 @@ mod tests {
     #[test]
     fn serialized_push_bounds_and_truncation() {
         let drop_then_true = script::Code(vec![0x75, 0x51]);
-        let check = |input: &[u8]| eval_script(input, &drop_then_true, &NullSignatureChecker());
+        let check =
+            |input: &[u8]| eval_script(input, &drop_then_true, &NullSignatureChecker(), NO_CHECKS);
         assert_eq!(check(&push(MAX_PUSH_BYTES)), Ok(true));
         assert_eq!(check(&push(MAX_PUSH_BYTES + 1)), Err(Error::PushSize));
         assert_eq!(check(&[0x4e, 255, 255, 255, 255]), Err(Error::PushSize));
@@ -347,7 +622,8 @@ mod tests {
     #[test]
     fn longer_than_necessary_push_encodings_are_rejected() {
         let drop_then_true = script::Code(vec![0x75, 0x51]);
-        let check = |input: &[u8]| eval_script(input, &drop_then_true, &NullSignatureChecker());
+        let check =
+            |input: &[u8]| eval_script(input, &drop_then_true, &NullSignatureChecker(), NO_CHECKS);
         // The same single payload byte, encoded four ways. Only the direct push is minimal.
         assert_eq!(check(&[0x01, 0x20]), Ok(true));
         for wider in [
@@ -385,7 +661,7 @@ mod tests {
     fn extra_and_leftover_stack_items_are_rejected() {
         let true_script = script::Code(vec![0x51]);
         let check = |input: &[u8], program: &script::Code| {
-            eval_script(input, program, &NullSignatureChecker())
+            eval_script(input, program, &NullSignatureChecker(), NO_CHECKS)
         };
         let clean_stack = Err(Error::Script(script::Error::CleanStack));
         assert_eq!(check(&[], &true_script), Ok(true));
@@ -400,52 +676,6 @@ mod tests {
         assert_eq!(check(&[0x51], &script::Code(vec![0x75])), clean_stack);
         // A result left beside a consumed argument.
         assert_eq!(check(&[0x51, 0x51], &script::Code(vec![0x75])), Ok(true));
-    }
-
-    #[test]
-    fn the_multisig_dummy_argument_cannot_be_padded() {
-        // A zero-of-zero multisig, so the dummy is the only argument and no signature is
-        // involved: `OP_0 OP_0 OP_CHECKMULTISIG` succeeds and leaves one item behind.
-        let multisig = script::Code(vec![0x00, 0x00, 0xae]);
-        // The opcode the refusal is reported against is not what this pins down.
-        let padded = |program: &script::Code, input: &[u8]| {
-            matches!(
-                eval_script(input, program, &NullSignatureChecker()),
-                Err(Error::Script(script::Error::Interpreter(
-                    _,
-                    interpreter::Error::SigNullDummy
-                )))
-            )
-        };
-        // The dummy CHECKMULTISIG consumes is never examined, so only an empty one leaves a
-        // spend with a single serialization.
-        assert_eq!(
-            eval_script(&[0x00], &multisig, &NullSignatureChecker()),
-            Ok(true)
-        );
-        // Anything else is a third party's free edit. Requiring shortest-form pushes does
-        // not reach it: each of these is the shortest encoding of its own payload, and the
-        // item is popped unexamined, so the spend would stay valid however large it grows.
-        for input in [
-            vec![0x01, 0x00],
-            vec![0x02, 0x00, 0x00],
-            push(1000),
-            push(MAX_PUSH_BYTES),
-        ] {
-            assert!(padded(&multisig, &input), "input {:?}", &input[..2]);
-        }
-        // The two rules compose rather than overlap: a one-byte payload a small-integer
-        // opcode would have pushed never reaches the dummy check, because the input is
-        // refused for its encoding first.
-        assert_eq!(
-            eval_script(&[0x01, 0x01], &multisig, &NullSignatureChecker()),
-            Err(Error::PushEncoding)
-        );
-        // CHECKMULTISIGVERIFY consumes the same argument, so the same rule binds it.
-        assert!(padded(
-            &script::Code(vec![0x00, 0x00, 0xaf, 0x51]),
-            &[0x01, 0x00]
-        ));
     }
 
     #[test]
@@ -483,7 +713,8 @@ mod tests {
                     eval_script(
                         &input,
                         &script::Code(program.clone()),
-                        &NullSignatureChecker()
+                        &NullSignatureChecker(),
+                        NO_CHECKS,
                     ),
                     expected,
                     "input {input:?}, program {program:?}",
@@ -516,7 +747,7 @@ mod tests {
         for count in [201, 202] {
             let checker = CountingChecker(core::cell::Cell::new(0));
             let code = script::Code([0, 0, 0xac].repeat(count));
-            let result = eval_script(&[], &code, &checker);
+            let result = eval_script(&[], &code, &checker, NO_CHECKS);
             if count == 201 {
                 // Each check leaves its own result behind, which the clean-stack rule
                 // rejects only after the budget has allowed exactly 201 operations.
@@ -550,13 +781,13 @@ mod tests {
         // Drop down to a single item, since every pushed argument stays on the stack.
         let program = script::Code(vec![0x75; scanned.pushes - 1]);
         assert_eq!(
-            eval_script(&input, &program, &NullSignatureChecker()),
+            eval_script(&input, &program, &NullSignatureChecker(), NO_CHECKS),
             Ok(true)
         );
         input.push(0);
         assert!(matches!(SpendingInput::scan(&input), Err(Error::InputSize)));
         assert_eq!(
-            eval_script(&input, &program, &NullSignatureChecker()),
+            eval_script(&input, &program, &NullSignatureChecker(), NO_CHECKS),
             Err(Error::InputSize)
         );
     }
@@ -569,14 +800,24 @@ mod tests {
         let mut program = duplicates.clone();
         program.extend(vec![0x75; copies - 1]); // DROP back down to a single item.
         assert_eq!(
-            eval_script(&input, &script::Code(program), &NullSignatureChecker()),
+            eval_script(
+                &input,
+                &script::Code(program),
+                &NullSignatureChecker(),
+                NO_CHECKS
+            ),
             Ok(true)
         );
         let mut program = duplicates;
         program.push(0x6b); // TOALTSTACK must not free the payload budget.
         program.extend_from_slice(&[0x76, 0x6a]); // DUP crosses the bound before RETURN.
         assert!(matches!(
-            eval_script(&input, &script::Code(program), &NullSignatureChecker()),
+            eval_script(
+                &input,
+                &script::Code(program),
+                &NullSignatureChecker(),
+                NO_CHECKS
+            ),
             Err(Error::Script(script::Error::Interpreter(
                 Some(_),
                 interpreter::Error::StackBytes
@@ -586,9 +827,81 @@ mod tests {
             eval_script(
                 &vec![0; 1001],
                 &script::Code(vec![0x51]),
-                &NullSignatureChecker()
+                &NullSignatureChecker(),
+                NO_CHECKS,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_third_party_cannot_respell_an_if_argument_or_a_number() {
+        let error = |input: &[u8], program: &[u8]| match eval_script(
+            input,
+            &script::Code(program.to_vec()),
+            &NullSignatureChecker(),
+            NO_CHECKS,
+        ) {
+            Err(Error::Script(script::Error::Interpreter(_, error))) => Some(error),
+            _ => None,
+        };
+        // IF 1 ELSE 1 ENDIF: both branches pass, so under legacy rules any argument does,
+        // and a third party could respell the spender's choice without invalidating it.
+        for opcode in [0x63, 0x64] {
+            let program = [opcode, 0x51, 0x67, 0x51, 0x68];
+            for canonical in [&[0x00][..], &[0x51]] {
+                let run = eval_script(
+                    canonical,
+                    &script::Code(program.to_vec()),
+                    &NullSignatureChecker(),
+                    NO_CHECKS,
+                );
+                assert_eq!(run, Ok(true));
+            }
+            for respelled in [
+                &[0x52][..],
+                &[0x60],
+                &[0x4f],
+                &[0x01, 0x00],
+                &[0x01, 0x80],
+                &[0x02, 0x01, 0x00],
+            ] {
+                assert_eq!(
+                    error(respelled, &program),
+                    Some(interpreter::Error::PqMinimalIf),
+                    "{opcode:#x} with {respelled:?}"
+                );
+            }
+        }
+        // An IF that does not execute reads nothing, so its would-be argument is not judged.
+        assert_eq!(
+            eval_script(
+                &[],
+                &script::Code(vec![0x00, 0x63, 0x52, 0x63, 0x68, 0x68, 0x51]),
+                &NullSignatureChecker(),
+                NO_CHECKS
+            ),
+            Ok(true)
+        );
+        // A number from the input has one spelling: 1 is OP_1, not 0x01 0x00.
+        let one_equals = [0x51, 0x9c];
+        assert_eq!(
+            eval_script(
+                &[0x51],
+                &script::Code(one_equals.to_vec()),
+                &NullSignatureChecker(),
+                NO_CHECKS
+            ),
+            Ok(true)
+        );
+        assert!(matches!(
+            error(&[0x02, 0x01, 0x00], &one_equals),
+            Some(interpreter::Error::Num(_))
+        ));
+        // And the committed script spells its own pushes the shortest way.
+        assert_eq!(
+            error(&[], &[0x4c, 0x01, 0x20, 0x75, 0x51]),
+            Some(interpreter::Error::MinimalData)
         );
     }
 }

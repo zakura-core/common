@@ -293,6 +293,7 @@ impl PqOutput {
             &body,
             signing_context(network, parameters),
             transaction,
+            selected.input.input_bytes(),
         )
         .map_err(Error::from)
     }
@@ -392,15 +393,22 @@ impl PqSpend<'_> {
         self.input.redeem_script()
     }
 
-    /// Counts signature operations in the committed body, inactive branches included.
+    /// The most signature checks this spend can run: the checking opcodes in the committed
+    /// body (inactive branches included), or what the input's byte budget pays for,
+    /// whichever is fewer.
     ///
-    /// Count this, not the serialized input: a PQ input's signature pushes exceed the
-    /// legacy push bound, where legacy counting stops and would report almost none of the
-    /// checks the body performs. It counts checks, not their cost: one SLH-DSA check costs
-    /// far more than one ECDSA check, and the work a block can demand under the existing
-    /// limits is still to be qualified.
-    pub fn sig_op_count(&self, accurate: bool) -> u32 {
-        Code(self.body().to_vec()).sig_op_count(accurate)
+    /// Both are upper bounds. A body has no loops and no multisig, so each checking opcode
+    /// runs at most once, and no check beyond the budget runs. So a 2-of-20 counts 2, and a
+    /// body that checks one signature many times counts what its bytes pay for. Use this,
+    /// not the legacy counter: that one stops at a PQ input's large pushes, and reads
+    /// `CHECKSIGADD` as an unknown opcode worth nothing.
+    pub fn sig_op_count(&self) -> u32 {
+        let opcodes = pq::signature_check_count(&Code(self.body().to_vec()));
+        let budget = self
+            .parameters
+            .check_budget(self.input.input_bytes())
+            .max_checks();
+        opcodes.min(u32::try_from(budget).unwrap_or(u32::MAX))
     }
 }
 

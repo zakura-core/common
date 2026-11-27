@@ -84,6 +84,28 @@ pub enum Error {
     #[error("PQ script stack byte limit exceeded")]
     StackBytes,
 
+    /// `OP_CHECKMULTISIG` and `OP_CHECKMULTISIGVERIFY` are invalid anywhere in a PQ
+    /// script: they cannot say in advance how many checks they will run.
+    #[cfg(feature = "pq")]
+    #[error("multisig opcodes are invalid in PQ scripts; use OP_CHECKSIGADD")]
+    PqMultisig,
+
+    /// A PQ spend ran more signature checks than its input pays for.
+    #[cfg(feature = "pq")]
+    #[error("PQ signature checks exceed the input's byte budget")]
+    PqCheckBudget,
+
+    /// A non-empty PQ signature failed. Only an empty signature may evaluate to false.
+    #[cfg(feature = "pq")]
+    #[error("non-empty PQ signature failed")]
+    PqNullFail,
+
+    /// A PQ `IF` or `NOTIF` was given something other than an empty item or `0x01`, so a
+    /// third party could have swapped it for another value of the same truth.
+    #[cfg(feature = "pq")]
+    #[error("PQ IF/NOTIF argument must be empty or 0x01")]
+    PqMinimalIf,
+
     // softfork safeness
     #[error("discouraged upgradable NOP encountered")]
     DiscourageUpgradableNOPs,

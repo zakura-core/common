@@ -159,44 +159,84 @@ which would be stronger than either alone; that one falls out of the rule rather
 having been weighed on its own.
 
 PQ execution rules are fixed rather than flag-driven: `CHECKLOCKTIMEVERIFY` is always
-enforced, every input push must use its shortest encoding, the argument multisig consumes
-without examining must be empty, and execution must end with exactly one stack item. The
-last three deny a third party cheap edits to someone else's spend, since ZIP 244 leaves the
-serialized input out of the transaction identifier. The shortest-encoding rule does not
-cover the multisig argument on its own, because any padding put there is the shortest
-encoding of its own payload and the item is discarded unexamined. There
-are no interpreter flags to pass: this module verifies PQ outputs and nothing else, so
-every other output keeps the evaluator, flags and limits the caller already applies to it.
+enforced, every push in the input and every push the body executes must use its shortest
+encoding, every item read as a number must be minimally encoded, `IF` and `NOTIF` take
+only an empty item or `0x01`, and execution must end with exactly one stack item. These
+deny a third party cheap edits to someone else's spend, since ZIP 244 leaves the
+serialized input out of the transaction identifier: without them a true `OP_1` given to
+`IF` could be respelled `OP_2`, or a false `OP_0` a pushed `0x00`, and the spend would
+stay valid. The body's own pushes are committed and cannot be edited, but are held to the
+same rule so a script has one spelling; a wallet must write bodies minimally, or a path
+that executes a longer push cannot be spent. An item a body reads only for its truth
+elsewhere (`VERIFY`, `IFDUP`, the final result) is not constrained, so a body should not
+take one from its input. There are no interpreter flags to pass: this module verifies PQ
+outputs and nothing else, so every other output keeps the evaluator, flags and limits the
+caller already applies to it.
 
 Transaction version: these spends assume v5 or later, whose digest commits to the previous
 output and therefore directly to both header bytes and the commitment. A v4 digest commits
 only
 to the script code it is handed, and not to the other inputs' outputs and amounts.
 
+## Signature checks and their budget
+
+The size of a signature limits how many fit in a block, about 117 for 128f in 2 MB. That
+bounds the verification work only if one signature means one check, which legacy script
+does not guarantee: a script can copy a signature and check it again, and `CHECKMULTISIG`
+tries keys in turn, so a 1-of-20 signed by the first key listed runs twenty checks. Within
+the 201-operation limit one input could run 182 checks, a block about 133 times the checks
+of an ordinary full one. PQ bodies therefore have two rules legacy scripts do not:
+
+1. **`OP_CHECKSIGADD` replaces multisig.** `CHECKMULTISIG` and `CHECKMULTISIGVERIFY` are
+   invalid anywhere in a PQ body, executed or not. `CHECKSIGADD` (`0xba`, as in Bitcoin's
+   BIP 342) takes `sig n pubkey` and leaves `n` when `sig` is empty, `n + 1` when it is a
+   valid signature. A non-empty signature that fails, under any checking opcode, makes the
+   spend invalid; only an empty one is false. A 2-of-3 over keys A, B and C is
+
+   ```
+   <A> CHECKSIG <B> CHECKSIGADD <C> CHECKSIGADD 2 NUMEQUAL
+   ```
+
+   and is spent with a signature or an empty item for each key, A's on top. A k-of-n runs
+   exactly k checks for k signatures, has no twenty-key limit, and costs one byte for each
+   key that does not sign.
+2. **A byte budget.** Each check run with a non-empty signature costs the scheme's
+   signature size (17,088 bytes for 128f, 16,224 for 192s), charged before the check runs.
+   A spend whose checks cost more than its whole serialized input, revealed body included,
+   is invalid. An honest check is paid for by its own signature; a copy is a check with no
+   bytes behind it; junk bytes buy checks only at the price of a signature. However its
+   scripts are written, a block can demand at most its size divided by the signature size:
+   about 117 checks for 128f, against 116 in an ordinary full block.
+
+Scripts that check one signature twice stop working; no known script does it on purpose.
+Wallets need the slot shape above for multisig, as Bitcoin wallets did for Tapscript.
+
+`PqSpend::sig_op_count` reports the most checks a spend can run: the checking opcodes in
+the body, all branches included, or what the budget pays for, whichever is fewer. Both are
+upper bounds, since a body has no loops and no multisig. So a 2-of-20 counts 2. Do not use
+the legacy counter on a PQ input or body: it stops at the input's large pushes and reads
+`CHECKSIGADD` as an unknown opcode worth nothing.
+
+Hashing is not covered by the budget. Copying a large stack item and hashing it costs about
+a hundred bytes hashed per input byte within the 201-operation limit, the same ratio legacy
+scripts with 520-byte items already allow.
+
 ## Resource rules
 
 The committed body is limited to 10,000 bytes, as any script is. Serialized input
 arguments are limited to 512 KiB with at most 17,089 payload bytes per push. The main and
 alternate stacks together retain the 1,000-item limit and additionally have a 1 MiB
-payload limit, checked initially and after each instruction. The 20-key multisig and
-201-operation limits are unchanged, including the charge for each key before multisig
-matching.
-
-Count signature operations with `PqSpend::sig_op_count`, over the committed body. Do not
-count them over the serialized input: its signature pushes exceed the legacy push bound,
-where legacy counting stops and would report almost none of the checks the body performs.
-It counts checks, not their cost: one SLH-DSA check costs far more than one ECDSA check.
-Fees use ZIP 317's existing size rule, which already charges a 17 kB input for its bytes.
-These bounds describe this prototype's behavior; the verification work a block can demand
-under them, memory use and relay policy still need qualification.
+payload limit, checked initially and after each instruction. The 201-operation limit is
+unchanged, and `CHECKSIGADD` counts as one operation, executed or not. Fees use ZIP 317's
+existing size rule, which already charges a 17 kB input for its bytes.
 
 ## Security argument and limits
 
 The output commits to the algorithm, the exact key and signature encodings, and the
 committed body. Per-scheme, per-network contexts separate these signatures from other
-protocols, formats and networks. Malformed nonempty signatures, public keys and selectors
-abort; an empty signature with a correctly sized key, and a cryptographically incorrect
-signature, evaluate false.
+protocols, formats and networks. Malformed signatures, public keys and selectors abort, and
+so does a non-empty signature that does not verify or has no digest; only an empty signature
+with a correctly sized key evaluates false.
 
 **A PQ output is claimable, not unspendable, wherever these rules are not active.** The
 script is three pushes, so under legacy execution it leaves the truthy commitment on top of

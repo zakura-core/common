@@ -1,4 +1,4 @@
-//! Library-level PQ script execution with existing multisig matching.
+//! Library-level PQ script execution under SLH-DSA.
 //!
 //! The caller authenticates the spending script, selects this path explicitly, and
 //! supplies the real transaction digest callback. The context is also caller-supplied:
@@ -36,6 +36,8 @@ impl SignatureChecker for Checker<'_, '_> {
     ) -> Result<bool, Error> {
         // Encoding errors abort even when the signature is empty. An empty signature
         // with a well-formed key deliberately pushes false without doing cryptography.
+        // A false result for a non-empty one, including a missing digest, aborts the
+        // spend in the evaluator, which also charges it to the input's budget first.
         // A key of any other length aborts, so no body can mix algorithms: an ECDSA
         // branch parses, then kills the spend if it is ever taken.
         if public_key.len() != self.parameters.public_key_bytes() {
@@ -73,35 +75,39 @@ impl SignatureChecker for Checker<'_, '_> {
     }
 }
 
-/// Executes a supplied script using SLH-DSA and the shared operation-count limit.
+/// Executes a supplied script using SLH-DSA under the PQ script rules.
 ///
-/// This library-only harness parses actual serialized input pushes and runs existing
-/// script opcodes, including CHECKSIG and CHECKSIGVERIFY. It does not authenticate an
-/// output commitment or activate PQ transactions. CHECKSIG consumes an operation;
-/// multisig additionally charges its key count before matching, bounding failed
-/// matches as well as successful checks. Aggregate transaction/block work limits
-/// and relay policy still require qualification.
+/// This library-only harness parses actual serialized input pushes and runs the script with
+/// `CHECKSIG`, `CHECKSIGVERIFY` and `CHECKSIGADD`; multisig opcodes are invalid. It does not
+/// authenticate an output commitment or activate PQ transactions. Each check given a
+/// non-empty signature costs [`ParameterSet::signature_bytes`] of `input_bytes`, the whole
+/// serialized input the arguments came from, revealed script included, and the script fails
+/// once its checks cost more. That bounds the checks a block can demand by its size, about
+/// one ordinary block's worth whatever the scripts do.
 /// The private verifier cannot be passed to a legacy evaluator by callers.
 ///
-/// Malformed nonempty signatures, keys, and selectors abort. A cryptographically
-/// incorrect signature or an empty signature with a valid-length key evaluates false.
+/// Malformed signatures, keys, and selectors abort, and so does a non-empty signature
+/// that is cryptographically incorrect or has no digest (such as `SIGHASH_SINGLE` without
+/// a corresponding output). Only an empty signature with a valid-length key is false.
 pub fn verify_script(
     parameters: ParameterSet,
-    input: &[u8],
+    arguments: &[u8],
     program: &Code,
     context: &[u8],
     transaction: &CallbackTransactionSignatureChecker<'_>,
+    input_bytes: usize,
 ) -> Result<bool, pq::Error> {
     if context.len() > 255 {
         return Err(pq::Error::ContextSize);
     }
     pq::eval_script(
-        input,
+        arguments,
         program,
         &Checker {
             transaction,
             context,
             parameters,
         },
+        parameters.check_budget(input_bytes),
     )
 }
