@@ -49,9 +49,10 @@
 //! SegWit idiom and because `OP_RESERVED` renders these outputs as invalid or burned in
 //! script-aware tooling. What replaces that protection is
 //! [`zcash_script::interpreter::Flags::PqOutputs`], which makes the legacy evaluator
-//! refuse any script in the namespace once set, as a `scriptPubKey` or as a P2SH redeem
-//! script. A caller that activates these rules without setting that flag, or that reaches
-//! the legacy evaluator by some path of its own, accepts any spend of a PQ output.
+//! refuse any `scriptPubKey` in the namespace once set. A caller that activates these rules
+//! without setting that flag, or that reaches the legacy evaluator by some path of its own,
+//! accepts any spend of a PQ output. A namespace script revealed as a P2SH redeem script
+//! keeps the legacy rules and is not PQ-protected, so a wallet must never build one.
 //!
 //! Because the commitment covers the body alone, the same thirty-two bytes can appear in
 //! an output of either scheme. Those are separate outputs, separately funded, and the

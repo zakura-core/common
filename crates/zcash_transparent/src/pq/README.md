@@ -209,9 +209,12 @@ script-aware tooling.
 Three things carry the weight that marker would have carried, and none of them is optional:
 
 1. `zcash_script`'s `Flags::PqOutputs`, which makes the legacy evaluator return
-   `Error::PqNamespace` instead of running any script in the namespace — as a
-   `scriptPubKey` and as a P2SH redeem script, for every shape it claims and not only the
-   defined ones. It must be set
+   `Error::PqNamespace` instead of running any `scriptPubKey` in the namespace, for every
+   shape it claims and not only the defined ones. It does not touch a P2SH redeem script:
+   a namespace script revealed there keeps the legacy rules, so turning the rules on
+   cannot freeze a P2SH output whose hidden script has that shape. Such a script is not
+   PQ-protected, since no arguments at all satisfy it, so a wallet must never build one.
+   The flag must be set
    uniformly once these rules activate; setting it for some inputs and not others makes the
    same output spendable or not depending on the verifier. It does not protect an
    implementation that does not use this crate, nor code that evaluates a script component

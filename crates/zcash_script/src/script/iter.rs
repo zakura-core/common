@@ -72,13 +72,12 @@ pub fn eval_script<T: script::Evaluable, U: script::Evaluable>(
                         .split_last()
                         .map_err(|_| script::Error::MissingRedeemScript)
                         .and_then(|(pub_key_2, remaining_stack)| {
-                            // The same refusal for a redeem script, so the rule is simply
-                            // that the legacy evaluator never runs a namespace script. A
-                            // P2SH wrapper hides it behind a hash until the first spend,
-                            // but it is satisfied by no arguments at all, so a wallet
-                            // treating a P2SH-wrapped PQ script as PQ-protected would be
-                            // wrong.
-                            refuse_pq_namespace(flags, pub_key_2)?;
+                            // A namespace script revealed here keeps the legacy rules: the
+                            // refusal applies only where the script is the output itself.
+                            // The redeem script of an unspent P2SH output is not on chain, so
+                            // refusing it here could freeze coins nobody can count. Such a
+                            // script is satisfied by no arguments at all, so it is not
+                            // PQ-protected, and a wallet must never build one.
                             script::Code(pub_key_2.clone()).eval(flags, checker, remaining_stack)
                         })
                         .map(|p2sh_stack| {
@@ -407,25 +406,29 @@ mod pq_namespace_tests {
         }
     }
 
-    /// A namespace script wrapped in P2SH is refused too, so the rule is simply that this
-    /// evaluator never runs one. Without the flag it is satisfied by no arguments at all,
-    /// which is the trap of treating a P2SH-wrapped PQ script as PQ-protected.
+    /// The flag refuses a namespace script only as the output itself. Revealed as a P2SH
+    /// redeem script it keeps exactly today's result, defined scheme or not, so turning the
+    /// rules on cannot freeze a P2SH output whose hidden script happens to have this shape.
+    /// It is also not PQ-protected there: no arguments at all satisfy it.
     #[test]
-    fn the_flag_refuses_a_namespace_redeem_script_under_p2sh() {
-        let redeem = namespace_script(1);
-        let hash = Ripemd160::digest(Sha256::digest(&redeem));
-        let mut pub_key = Vec::from([0xa9u8, 0x14]); // OP_HASH160, push 20
-        pub_key.extend_from_slice(&hash);
-        pub_key.push(0x87); // OP_EQUAL
+    fn the_flag_leaves_a_namespace_redeem_script_under_p2sh_alone() {
+        for scheme in [1, 2, 3, 16] {
+            let redeem = namespace_script(scheme);
+            let hash = Ripemd160::digest(Sha256::digest(&redeem));
+            let mut pub_key = Vec::from([0xa9u8, 0x14]); // OP_HASH160, push 20
+            pub_key.extend_from_slice(&hash);
+            pub_key.push(0x87); // OP_EQUAL
 
-        let mut sig = Vec::from([redeem.len() as u8]);
-        sig.extend_from_slice(&redeem);
+            let mut sig = Vec::from([redeem.len() as u8]);
+            sig.extend_from_slice(&redeem);
 
-        assert_eq!(eval(sig.clone(), pub_key.clone(), Flags::P2SH), Ok(true));
-        assert_eq!(
-            eval_full(sig, pub_key, Flags::P2SH | Flags::PqOutputs),
-            Err((script::ComponentType::Redeem, script::Error::PqNamespace))
-        );
+            assert_eq!(eval(sig.clone(), pub_key.clone(), Flags::P2SH), Ok(true));
+            assert_eq!(
+                eval_full(sig, pub_key, Flags::P2SH | Flags::PqOutputs),
+                Ok(true),
+                "scheme {scheme}"
+            );
+        }
     }
 
     /// Both two-component entry points funnel through the guard, so the typed one is

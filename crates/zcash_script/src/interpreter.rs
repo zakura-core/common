@@ -189,18 +189,21 @@ bitflags::bitflags! {
         /// See [BIP65](https://github.com/bitcoin/bips/blob/master/bip-0065.mediawiki) for details.
         const CHECKLOCKTIMEVERIFY = 1 << 9;
 
-        /// Refuse to evaluate a script in the post-quantum output namespace, which is
-        /// exactly thirty-five bytes of `OP_0 <OP_1..OP_16> 0x20 <32 bytes>`; see
-        /// [`crate::script::is_pq_namespace`].
+        /// Refuse to evaluate a `scriptPubKey` in the post-quantum output namespace: a
+        /// format opcode, a scheme opcode, then one direct push and nothing after, 4 to 78
+        /// bytes in all; [`crate::script::is_pq_namespace`] is the definition.
         ///
-        /// Such a script is three pushes, so under legacy rules it leaves the truthy
-        /// thirty-two-byte commitment on top of the stack and is satisfied by an *empty*
-        /// scriptSig. It is spendable only under the post-quantum rules, which this
-        /// evaluator does not implement, so evaluating it here would hand the output to
-        /// anyone. With this flag set the evaluator returns
-        /// [`crate::script::Error::PqNamespace`] instead, both for a `scriptPubKey` and for
-        /// a P2SH redeem script, and for every shape in the namespace whether or not
-        /// anything defines it.
+        /// Such a script is three pushes, so under legacy rules it leaves a truthy value on
+        /// top of the stack and is satisfied by an *empty* scriptSig. It is spendable only
+        /// under the post-quantum rules, which this evaluator does not implement, so
+        /// evaluating it here would hand the output to anyone. With this flag set the
+        /// evaluator returns [`crate::script::Error::PqNamespace`] instead, for every shape
+        /// in the namespace whether or not anything defines it.
+        ///
+        /// The refusal applies to the output script only. A namespace script revealed as a
+        /// P2SH redeem script keeps the legacy rules, so this flag cannot freeze a P2SH
+        /// output whose hidden script has that shape. Such a script is not PQ-protected:
+        /// no arguments at all satisfy it.
         ///
         /// Note: this must be set uniformly once the post-quantum rules activate. Setting
         /// it for some inputs and not others makes the same output spendable or not
