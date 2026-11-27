@@ -41,7 +41,7 @@ use crate::transaction::{
 /// A transparent authorizing context that knows the spent outputs, as a verifier would.
 #[derive(Debug)]
 pub(super) struct SpentOutputs {
-    reads: core::cell::Cell<usize>,
+    pub(super) reads: core::cell::Cell<usize>,
     pub(super) amounts: Vec<Zatoshis>,
     pub(super) script_pubkeys: Vec<Script>,
 }

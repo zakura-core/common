@@ -21,6 +21,8 @@ use crate::transaction::{
         FeeRule,
         transparent::{InputView, OutputView},
     },
+    sighash::SighashError,
+    v7,
 };
 
 #[cfg(feature = "std")]
@@ -36,7 +38,7 @@ use {
 use {
     crate::transaction::{
         Authorization, Coinbase, TransactionData, TxDigests,
-        sighash::{SignableInput, signature_hash},
+        sighash::{SignableInput, V7ShieldedSighashes, V7SignatureHashes, signature_hash},
         txid::TxIdDigester,
     },
     ::sapling::prover::{OutputProver, SpendProver},
@@ -62,6 +64,11 @@ pub const PRE_NU7_DEFAULT_TX_EXPIRY_DELTA: u32 = 40;
 /// approximately 50 minutes.
 pub const NU7_DEFAULT_TX_EXPIRY_DELTA: u32 =
     consensus::NU7_POW_TARGET_SPACING_RATIO * PRE_NU7_DEFAULT_TX_EXPIRY_DELTA;
+
+/// The largest `nExpiryHeight` that [ZIP 203] permits.
+///
+/// [ZIP 203]: https://zips.z.cash/zip-0203
+const MAX_EXPIRY_HEIGHT: u32 = 499_999_999;
 
 /// Returns the ordinary transaction expiry delta at the candidate inclusion height.
 /// Explicit expiry overrides and coinbase expiry are independent of this default.
@@ -179,10 +186,27 @@ pub enum Error<FE> {
         target_height: BlockHeight,
         expiry_height: BlockHeight,
     },
+    /// A v7 transaction's expiry height is above [ZIP 203]'s limit of 499999999.
+    ///
+    /// [ZIP 203]: https://zips.z.cash/zip-0203
+    InvalidExpiryHeight { expiry_height: BlockHeight },
     /// The proposed transaction version or the consensus branch id for the target height does not
     /// support a feature required by the transaction under construction, or the proposed
     /// transaction version is not supported on the given consensus branch.
     TargetIncompatible(BranchId, TxVersion, Option<PoolType>),
+    /// The coinbase configuration does not allow the proposed transaction version: a v7
+    /// coinbase transaction needs [`BuildConfig::V7Coinbase`], and an earlier one
+    /// [`BuildConfig::Coinbase`].
+    CoinbaseVersionMismatch(TxVersion),
+    /// The coinbase bundle of a v7 coinbase transaction is invalid.
+    V7Coinbase(v7::CoinbaseError),
+    /// The ZIP 235 fee contribution of a v7 coinbase transaction exceeds its fees.
+    NsmFeeContributionExceedsFees,
+    /// A v7 transaction has more transparent inputs, or a shielded bundle more spends,
+    /// than a v7 signature context can address.
+    Sighash(SighashError),
+    /// Partially created transactions (PCZTs) do not support this transaction version.
+    PcztUnsupported(TxVersion),
 }
 
 impl<FE: fmt::Display> fmt::Display for Error<FE> {
@@ -238,6 +262,24 @@ impl<FE: fmt::Display> fmt::Display for Error<FE> {
             } => write!(
                 f,
                 "Coinbase transaction expiry height {expiry_height} does not match target block height {target_height}"
+            ),
+            Error::InvalidExpiryHeight { expiry_height } => write!(
+                f,
+                "Transaction expiry height {expiry_height} is above the limit of {MAX_EXPIRY_HEIGHT}"
+            ),
+            Error::CoinbaseVersionMismatch(version) => write!(
+                f,
+                "The coinbase configuration cannot build transaction version {version:?}"
+            ),
+            Error::V7Coinbase(err) => write!(f, "Invalid v7 coinbase bundle: {err}"),
+            Error::NsmFeeContributionExceedsFees => write!(
+                f,
+                "The fee contribution removed from circulation exceeds the block's fees"
+            ),
+            Error::Sighash(err) => write!(f, "Could not compute a signature digest: {err}"),
+            Error::PcztUnsupported(version) => write!(
+                f,
+                "Partially created transactions do not support transaction version {version:?}"
             ),
             Error::TargetIncompatible(branch_id, version, pool_type) => match pool_type {
                 None => write!(
@@ -376,9 +418,63 @@ pub enum BuildConfig {
         orchard_padding: BundlePadding,
         ironwood_padding: BundlePadding,
     },
-    Coinbase {
-        miner_data: Option<PushValue>,
-    },
+    /// A coinbase transaction before v7, which identifies itself with a coinbase input
+    /// carrying the block height and `miner_data`.
+    Coinbase { miner_data: Option<PushValue> },
+    /// A v7 coinbase transaction ([ZIP 248]), whose coinbase bundle states the block
+    /// height and the block's issuance. The builder builds it in the v7 format.
+    ///
+    /// [ZIP 248]: https://zips.z.cash/zip-0248
+    V7Coinbase(V7CoinbaseConfig),
+}
+
+/// What a v7 coinbase transaction states about its block, besides its outputs.
+///
+/// The builder derives the coinbase bundle and the value pool deltas from it, and
+/// requires the outputs to pay exactly the subsidy left after the lockbox deposit, plus
+/// the fees left after the ZIP 235 contribution.
+///
+/// Consensus checks every field against the block, so a wrong value builds a
+/// transaction that the block cannot contain.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct V7CoinbaseConfig {
+    /// The block subsidy.
+    pub block_subsidy: Zatoshis,
+    /// The part of the block subsidy that funding streams deposit into the lockbox.
+    pub lockbox_value: Zatoshis,
+    /// The fees paid by the other transactions in the block, before ZIP 235 removes a
+    /// part of them from circulation.
+    pub fees: Zatoshis,
+    /// `NSMFeeContribution(height)`: the part of `fees` that ZIP 235 removes from
+    /// circulation.
+    pub nsm_fee_contribution: Zatoshis,
+    /// Data chosen by the miner, at most [`v7::MAX_COINBASE_DATA_LEN`] bytes.
+    pub coinbase_data: alloc::vec::Vec<u8>,
+    /// The miner's response to a poll.
+    pub miner_poll: Option<v7::MinerPoll>,
+}
+
+impl V7CoinbaseConfig {
+    /// Describes a block's issuance and fees, with no coinbase data and no poll response.
+    ///
+    /// `nsm_fee_contribution` must be the ZIP 235 `NSMFeeContribution` of the block, which
+    /// the caller computes from `fees`.
+    pub fn new(
+        block_subsidy: Zatoshis,
+        lockbox_value: Zatoshis,
+        fees: Zatoshis,
+        nsm_fee_contribution: Zatoshis,
+    ) -> Self {
+        Self {
+            block_subsidy,
+            lockbox_value,
+            fees,
+            nsm_fee_contribution,
+            coinbase_data: alloc::vec::Vec::new(),
+            miner_poll: None,
+        }
+    }
 }
 
 impl BuildConfig {
@@ -390,7 +486,7 @@ impl BuildConfig {
             BuildConfig::Standard { sapling_anchor, .. } => sapling_anchor
                 .as_ref()
                 .map(|a| (sapling::builder::BundleType::DEFAULT, *a)),
-            BuildConfig::Coinbase { .. } => Some((
+            BuildConfig::Coinbase { .. } | BuildConfig::V7Coinbase(_) => Some((
                 sapling::builder::BundleType::Coinbase,
                 sapling::Anchor::empty_tree(),
             )),
@@ -420,7 +516,7 @@ impl BuildConfig {
                 .expect("a transactional bundle type with default flags is always representable")
             }),
             // Current Orchard requires spends; coinbase outputs can use Ironwood.
-            BuildConfig::Coinbase { .. } => None,
+            BuildConfig::Coinbase { .. } | BuildConfig::V7Coinbase(_) => None,
         }
     }
 
@@ -441,7 +537,7 @@ impl BuildConfig {
                 )
                 .expect("a transactional bundle type with default flags is always representable")
             }),
-            BuildConfig::Coinbase { .. } => Some(
+            BuildConfig::Coinbase { .. } | BuildConfig::V7Coinbase(_) => Some(
                 orchard::builder::Builder::new(
                     orchard::builder::BundleType::Coinbase,
                     bundle_version,
@@ -455,7 +551,10 @@ impl BuildConfig {
 
     /// Returns `true` if this configuration is for building a coinbase transaction.
     pub fn is_coinbase(&self) -> bool {
-        matches!(self, BuildConfig::Coinbase { .. })
+        matches!(
+            self,
+            BuildConfig::Coinbase { .. } | BuildConfig::V7Coinbase(_)
+        )
     }
 }
 
@@ -910,13 +1009,27 @@ impl<P, U> Builder<P, U> {
     /// Checks that the given version supports all features required by the inputs and
     /// outputs already added to the builder.
     fn check_version_compatibility<FE>(&self, version: TxVersion) -> Result<(), Error<FE>> {
-        // The builder does not construct v7 transactions yet.
-        if version == TxVersion::V7 || !version.valid_in_branch(self.consensus_branch_id) {
+        // A v7 coinbase transaction states its height in a coinbase bundle, and an earlier
+        // one in a coinbase input, so the coinbase configuration fixes the version.
+        let coinbase_version_mismatch = match self.build_config {
+            BuildConfig::Coinbase { .. } => version == TxVersion::V7,
+            BuildConfig::V7Coinbase(_) => version != TxVersion::V7,
+            BuildConfig::Standard { .. } => false,
+        };
+        if coinbase_version_mismatch {
+            return Err(Error::CoinbaseVersionMismatch(version));
+        }
+        if !version.valid_in_branch(self.consensus_branch_id) {
             return Err(Error::TargetIncompatible(
                 self.consensus_branch_id,
                 version,
                 None,
             ));
+        }
+        if version == TxVersion::V7 && u32::from(self.expiry_height) > MAX_EXPIRY_HEIGHT {
+            return Err(Error::InvalidExpiryHeight {
+                expiry_height: self.expiry_height,
+            });
         }
 
         let sapling_available = version.has_sapling() && self.consensus_branch_id.has_sapling();
@@ -970,7 +1083,9 @@ impl<P, U> Builder<P, U> {
     ///
     /// Validates that the proposed version supports all features required by
     /// the inputs and outputs already added to the builder. Returns
-    /// [`Error::TargetIncompatible`] if validation fails.
+    /// [`Error::TargetIncompatible`] if validation fails, or
+    /// [`Error::CoinbaseVersionMismatch`] if the coinbase configuration fixes another
+    /// version.
     ///
     /// The same validation is performed at build time to catch inputs/outputs
     /// added after this call.
@@ -995,8 +1110,12 @@ impl<P: consensus::Parameters> Builder<P, ()> {
         // is enabled only for the current proving protocol (NU6.3 onward).
         let bundle_version =
             bundle_version_for_branch(consensus_branch_id, orchard::ValuePool::Orchard);
-        // Default transaction version for the branch (V6 from NU6.3 onward).
-        let tx_version = TxVersion::suggested_for_branch(consensus_branch_id);
+        // Default transaction version for the branch (V6 from NU6.3 onward), except that a
+        // v7 coinbase configuration is v7.
+        let tx_version = match build_config {
+            BuildConfig::V7Coinbase(_) => TxVersion::V7,
+            _ => TxVersion::suggested_for_branch(consensus_branch_id),
+        };
 
         let orchard_builder = bundle_version.and_then(|v| build_config.orchard_builder(v));
 
@@ -1035,7 +1154,8 @@ impl<P: consensus::Parameters> Builder<P, ()> {
 
         Builder {
             params,
-            proposed_version: None,
+            proposed_version: matches!(build_config, BuildConfig::V7Coinbase(_))
+                .then_some(TxVersion::V7),
             consensus_branch_id,
             build_config,
             target_height,
@@ -1326,6 +1446,77 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
         )
     }
 
+    /// Derives the parts of a v7 transaction that earlier versions lack: the value pool
+    /// deltas that no bundle carries as its value balance, and the coinbase bundle.
+    ///
+    /// For a coinbase transaction this also checks that its outputs pay exactly what its
+    /// coinbase and fee bundles contribute, so that the deltas balance.
+    #[cfg(feature = "circuits")]
+    fn v7_fields<FE>(&self, fee: Option<Zatoshis>) -> Result<v7::V7Fields, Error<FE>> {
+        #[cfg(feature = "transparent-inputs")]
+        {
+            let inputs = self.transparent_builder.inputs().len();
+            // A v7 coinbase transaction spends nothing: its coinbase bundle replaces the
+            // coinbase input.
+            if matches!(self.build_config, BuildConfig::V7Coinbase(_)) && inputs > 0 {
+                return Err(Error::Coinbase(coinbase::Error::UnexpectedInputs));
+            }
+            // Each v7 signature commits to its input's position in two bytes.
+            if inputs > usize::from(u16::MAX) + 1 {
+                return Err(Error::Sighash(SighashError::IndexOutOfRange));
+            }
+        }
+        let transparent = self.transparent_builder.value_balance()?;
+        match &self.build_config {
+            BuildConfig::Standard { .. } => Ok(v7::V7Fields {
+                value_deltas: v7::ValueDeltas {
+                    transparent,
+                    fee: -ZatBalance::from(fee.expect("a standard transaction pays a fee")),
+                    ..v7::ValueDeltas::default()
+                },
+                coinbase_bundle: None,
+            }),
+            BuildConfig::V7Coinbase(config) => {
+                let coinbase_bundle = v7::CoinbaseBundle::new(
+                    self.target_height,
+                    config.block_subsidy,
+                    config.lockbox_value,
+                    config.coinbase_data.clone(),
+                    config.miner_poll.clone(),
+                )
+                .map_err(Error::V7Coinbase)?;
+                if config.nsm_fee_contribution > config.fees {
+                    return Err(Error::NsmFeeContributionExceedsFees);
+                }
+                // ZIP 248: the coinbase bundle contributes the subsidy less the lockbox
+                // deposit and the ZIP 235 fee contribution, and the fee bundle the gross
+                // fees.
+                let coinbase = (ZatBalance::from(config.block_subsidy)
+                    - ZatBalance::from(config.lockbox_value)
+                    - ZatBalance::from(config.nsm_fee_contribution))
+                .ok_or(BalanceError::Underflow)?;
+                let fee = ZatBalance::from(config.fees);
+                let balance =
+                    (self.value_balance()? + coinbase + fee).ok_or(BalanceError::Overflow)?;
+                match balance.cmp(&ZatBalance::zero()) {
+                    Ordering::Less => return Err(Error::InsufficientFunds(-balance)),
+                    Ordering::Greater => return Err(Error::ChangeRequired(balance)),
+                    Ordering::Equal => (),
+                }
+                Ok(v7::V7Fields {
+                    value_deltas: v7::ValueDeltas {
+                        transparent,
+                        coinbase,
+                        fee,
+                        ..v7::ValueDeltas::default()
+                    },
+                    coinbase_bundle: Some(coinbase_bundle),
+                })
+            }
+            BuildConfig::Coinbase { .. } => Err(Error::CoinbaseVersionMismatch(TxVersion::V7)),
+        }
+    }
+
     /// Returns the sum of the transparent, Sapling, Orchard, and Ironwood value balances.
     #[cfg(any(feature = "circuits", feature = "pczt"))]
     fn value_balance(&self) -> Result<ZatBalance, BalanceError> {
@@ -1429,7 +1620,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         fee_rule: &FR,
     ) -> Result<BuildResult, Error<FR::Error>> {
         match &self.build_config {
-            BuildConfig::Coinbase { .. } => {
+            BuildConfig::Coinbase { .. } | BuildConfig::V7Coinbase(_) => {
                 self.build_coinbase_internal(rng, spend_prover, output_prover)
             }
             BuildConfig::Standard { .. } => {
@@ -1453,9 +1644,10 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
 
     /// Builds a coinbase transaction without wallet spending keys or fee calculation.
     ///
-    /// The builder must have been constructed with [`BuildConfig::Coinbase`].
-    /// Other configurations return [`coinbase::Error::InvalidBuilderConfiguration`]. All
-    /// version, expiry-height, proof, and signature checks are shared with the wallet transaction builder.
+    /// The builder must have been constructed with [`BuildConfig::Coinbase`] or
+    /// [`BuildConfig::V7Coinbase`]. Other configurations return
+    /// [`coinbase::Error::InvalidBuilderConfiguration`]. All version, expiry-height, proof,
+    /// and signature checks are shared with the wallet transaction builder.
     #[cfg(feature = "circuits")]
     pub fn build_coinbase<R: Rng + CryptoRng, SP: SpendProver, OP: OutputProver>(
         self,
@@ -1473,18 +1665,25 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         spend_prover: &SP,
         output_prover: &OP,
     ) -> Result<BuildResult, Error<FE>> {
-        let BuildConfig::Coinbase { miner_data } = &self.build_config else {
-            return Err(Error::Coinbase(
-                coinbase::Error::InvalidBuilderConfiguration,
-            ));
+        // Before v7, the coinbase input carries the height and the miner's data; a v7
+        // coinbase transaction states them in its coinbase bundle instead.
+        let coinbase_input_miner_data = match &self.build_config {
+            BuildConfig::Coinbase { miner_data } => Some(miner_data.clone()),
+            BuildConfig::V7Coinbase(_) => None,
+            BuildConfig::Standard { .. } => {
+                return Err(Error::Coinbase(
+                    coinbase::Error::InvalidBuilderConfiguration,
+                ));
+            }
         };
         let target_height = self.target_height;
-        let miner_data = miner_data.clone();
         self.build_internal::<Coinbase, _, _, _, _>(
-            |b| {
-                b.build_coinbase(target_height, miner_data)
+            move |b| match coinbase_input_miner_data {
+                Some(miner_data) => b
+                    .build_coinbase(target_height, miner_data)
                     .map(Some)
-                    .map_err(Error::Coinbase)
+                    .map_err(Error::Coinbase),
+                None => b.build_v7_coinbase().map_err(Error::Coinbase),
             },
             |b, _, _| Ok(b.clone().map_authorization(transparent::builder::Coinbase)),
             #[cfg(feature = "wallet")]
@@ -1565,6 +1764,10 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             };
         }
 
+        let v7_fields = (version == TxVersion::V7)
+            .then(|| self.v7_fields(fee))
+            .transpose()?;
+
         let transparent_bundle = build_transparent(self.transparent_builder)?;
 
         let (sapling_bundle, sapling_meta) = match self
@@ -1625,26 +1828,44 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             None => (None, orchard::builder::BundleMetadata::empty()),
         };
 
-        let unauthed_tx: TransactionData<A> = TransactionData {
-            version,
-            consensus_branch_id: self.consensus_branch_id,
-            lock_time: 0,
-            expiry_height: self.expiry_height,
-            transparent_bundle,
-            // We don't support constructing Sprout bundles.
-            //
-            // # Consensus
-            //
-            // > A coinbase transaction MUST NOT have any JoinSplit descriptions.
-            //
-            // > A coinbase transaction MUST NOT have any Spend descriptions.
-            //
-            // <https://zips.z.cash/protocol/protocol.pdf#txnconsensus>
-            sprout_bundle: None,
-            sapling_bundle,
-            orchard_bundle,
-            ironwood_bundle,
-            v7: None,
+        let unauthed_tx: TransactionData<A> = match v7_fields {
+            Some(fields) => TransactionData::from_parts_v7(
+                self.consensus_branch_id,
+                0,
+                self.expiry_height,
+                transparent_bundle,
+                sapling_bundle,
+                orchard_bundle,
+                ironwood_bundle,
+                fields,
+            )
+            .expect(
+                "the builder derives each delta from its own bundle, builds Orchard and \
+                 Ironwood bundles with the versions of their pools in this branch, and in a \
+                 coinbase configuration rejects transparent inputs and builds shielded \
+                 bundles without spends",
+            ),
+            None => TransactionData {
+                version,
+                consensus_branch_id: self.consensus_branch_id,
+                lock_time: 0,
+                expiry_height: self.expiry_height,
+                transparent_bundle,
+                // We don't support constructing Sprout bundles.
+                //
+                // # Consensus
+                //
+                // > A coinbase transaction MUST NOT have any JoinSplit descriptions.
+                //
+                // > A coinbase transaction MUST NOT have any Spend descriptions.
+                //
+                // <https://zips.z.cash/protocol/protocol.pdf#txnconsensus>
+                sprout_bundle: None,
+                sapling_bundle,
+                orchard_bundle,
+                ironwood_bundle,
+                v7: None,
+            },
         };
 
         //
@@ -1659,12 +1880,35 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             .transpose()
             .map_err(Error::TransparentBuild)?;
 
-        // the commitment being signed is shared across all Sapling inputs; once
-        // V4 transactions are deprecated this should just be the txid, but
-        // for now we need to continue to compute it here.
-        let shielded_sig_commitment =
-            signature_hash(&unauthed_tx, &SignableInput::Shielded, &txid_parts)
-                .expect("the builder makes only pre-v7 transactions, whose shielded signatures share one digest");
+        let prepared = (version == TxVersion::V7)
+            .then(|| V7SignatureHashes::new(&unauthed_tx))
+            .transpose()
+            .map_err(Error::Sighash)?;
+        let shielded_sighashes = |bundle_type| {
+            match &prepared {
+                Some(prepared) => prepared
+                    .shielded_sighashes(bundle_type)
+                    .map(ShieldedSighashes::PerSignature),
+                None => signature_hash(&unauthed_tx, &SignableInput::Shielded, &txid_parts)
+                    .map(|hash| ShieldedSighashes::Shared(*hash.as_ref())),
+            }
+            .map_err(Error::Sighash)
+        };
+        let sapling_sighashes = unauthed_tx
+            .sapling_bundle
+            .as_ref()
+            .map(|_| shielded_sighashes(v7::ShieldedBundleType::Sapling))
+            .transpose()?;
+        let orchard_sighashes = unauthed_tx
+            .orchard_bundle
+            .as_ref()
+            .map(|_| shielded_sighashes(v7::ShieldedBundleType::Orchard))
+            .transpose()?;
+        let ironwood_sighashes = unauthed_tx
+            .ironwood_bundle
+            .as_ref()
+            .map(|_| shielded_sighashes(v7::ShieldedBundleType::Ironwood))
+            .transpose()?;
 
         #[cfg(feature = "wallet")]
         let sapling_asks = sapling_extsks
@@ -1675,7 +1919,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         let sapling_asks = Vec::new();
         let sapling_bundle = unauthed_tx
             .sapling_bundle
-            .map(|b| b.apply_signatures(&mut rng, *shielded_sig_commitment.as_ref(), &sapling_asks))
+            .zip(sapling_sighashes)
+            .map(|(b, sighashes)| b.apply_signatures(&mut rng, sighashes, &sapling_asks))
             .transpose()
             .map_err(Error::SaplingBuild)?;
 
@@ -1718,22 +1963,22 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
 
         let orchard_bundle = unauthed_tx
             .orchard_bundle
-            .map(|b| {
+            .zip(orchard_sighashes)
+            .map(|(b, sighashes)| {
                 b.create_proof(
                     orchard_proving_key
                         .expect("proving key is built when an Orchard bundle is present"),
                     &mut rng,
                 )
-                .and_then(|b| {
-                    b.apply_signatures(&mut rng, *shielded_sig_commitment.as_ref(), orchard_saks)
-                })
+                .and_then(|b| b.apply_signatures(&mut rng, sighashes, orchard_saks))
             })
             .transpose()
             .map_err(Error::OrchardBuild)?;
 
         let ironwood_bundle = unauthed_tx
             .ironwood_bundle
-            .map(|b| {
+            .zip(ironwood_sighashes)
+            .map(|(b, sighashes)| {
                 b.create_proof(
                     orchard_proving_key
                         .expect("proving key is built when an Ironwood bundle is present"),
@@ -1745,7 +1990,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
                     // restrictions select the Ironwood circuit and flag rules;
                     // `apply_signatures` only signs actions whose `ak` matches
                     // a supplied spend authorizing key.
-                    b.apply_signatures(&mut rng, *shielded_sig_commitment.as_ref(), orchard_saks)
+                    b.apply_signatures(&mut rng, sighashes, orchard_saks)
                 })
             })
             .transpose()
@@ -1761,11 +2006,12 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
             sapling_bundle,
             orchard_bundle,
             ironwood_bundle,
-            v7: None,
+            v7: unauthed_tx.v7,
         };
 
-        // The unwrap() here is safe because the txid hashing
-        // of freeze() should be infalliable.
+        // The unwrap() here is safe because the txid hashing of freeze() should be
+        // infallible, and signing keeps the bundles whose v7 data already passed the
+        // bundle-local rules in from_parts_v7, so freeze() accepts them again.
         Ok(BuildResult {
             transaction: authorized_tx.freeze().unwrap(),
             sapling_meta,
@@ -1787,8 +2033,12 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
         mut rng: R,
         fee_rule: &FR,
     ) -> Result<PcztResult<P>, Error<FR::Error>> {
-        let fee = self.get_fee(fee_rule).map_err(Error::Fee)?;
+        // PCZTs do not represent the v7 format's fields yet.
         let version = self.transaction_version()?;
+        if version == TxVersion::V7 {
+            return Err(Error::PcztUnsupported(version));
+        }
+        let fee = self.get_fee(fee_rule).map_err(Error::Fee)?;
         self.check_version_compatibility::<FR::Error>(version)?;
         self.check_coinbase_expiry_height::<FR::Error>()?;
 
@@ -1876,10 +2126,56 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
     }
 }
 
+/// The digests the builder signs a shielded bundle with: one digest that every signature
+/// shares before v7, and one per signature in v7.
+#[cfg(feature = "circuits")]
+enum ShieldedSighashes {
+    Shared([u8; 32]),
+    PerSignature(V7ShieldedSighashes),
+}
+
+#[cfg(feature = "circuits")]
+impl sapling::bundle::SignatureDigests for ShieldedSighashes {
+    fn spend_auth(&self, index: usize) -> Option<[u8; 32]> {
+        match self {
+            Self::Shared(sighash) => Some(*sighash),
+            Self::PerSignature(sighashes) => {
+                sapling::bundle::SignatureDigests::spend_auth(sighashes, index)
+            }
+        }
+    }
+
+    fn binding(&self) -> [u8; 32] {
+        match self {
+            Self::Shared(sighash) => *sighash,
+            Self::PerSignature(sighashes) => sapling::bundle::SignatureDigests::binding(sighashes),
+        }
+    }
+}
+
+#[cfg(feature = "circuits")]
+impl orchard::bundle::SignatureDigests for ShieldedSighashes {
+    fn spend_auth(&self, index: usize) -> Option<[u8; 32]> {
+        match self {
+            Self::Shared(sighash) => Some(*sighash),
+            Self::PerSignature(sighashes) => {
+                orchard::bundle::SignatureDigests::spend_auth(sighashes, index)
+            }
+        }
+    }
+
+    fn binding(&self) -> [u8; 32] {
+        match self {
+            Self::Shared(sighash) => *sighash,
+            Self::PerSignature(sighashes) => orchard::bundle::SignatureDigests::binding(sighashes),
+        }
+    }
+}
+
+#[cfg(all(feature = "circuits", feature = "std"))]
 /// Returns the shared proving key for the current Orchard and Ironwood circuit.
 ///
 /// Historical versions return an error before any key is built or cached.
-#[cfg(all(feature = "circuits", feature = "std"))]
 pub fn cached_orchard_proving_key(
     circuit_version: orchard::circuit::OrchardCircuitVersion,
 ) -> Result<&'static orchard::circuit::ProvingKey, orchard::circuit::UnsupportedCircuitVersion> {
@@ -1905,7 +2201,10 @@ fn authorize_transparent(
     b.clone().apply_signatures(
         |input| {
             *signature_hash(unauthed_tx, &SignableInput::Transparent(input), txid_parts)
-                .expect("the builder makes only pre-v7 transactions, whose transparent signatures cannot fail")
+                .expect(
+                    "the builder signs with SIGHASH_ALL over its own spent outputs, and limits a \
+                     v7 transaction's inputs to those a signature context can address",
+                )
                 .as_ref()
         },
         transparent_signing_set,
