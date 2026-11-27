@@ -103,6 +103,16 @@ impl ParameterSet {
             Self::Sha2_192s => sha2_192s::SIGNATURE_BYTES,
         }
     }
+    /// The signature checks a spending input of `input_bytes` may run under this
+    /// parameter set: one signature's worth of the input for each.
+    ///
+    /// `input_bytes` is the whole serialized input, revealed script included.
+    pub const fn check_budget(self, input_bytes: usize) -> zcash_script::pq::CheckBudget {
+        let Some(signature_bytes) = core::num::NonZeroUsize::new(self.signature_bytes()) else {
+            unreachable!()
+        };
+        zcash_script::pq::CheckBudget::new(input_bytes, signature_bytes)
+    }
 
     /// The unified-address receiver scheme that names this parameter set.
     ///

@@ -96,6 +96,17 @@ fn clean_stack() -> Error {
     Error::Pq(pq::Error::Script(script::Error::CleanStack))
 }
 
+fn script_error(opcode: zcash_script::Opcode, error: InterpreterError) -> Error {
+    Error::Pq(pq::Error::Script(script::Error::Interpreter(
+        Some(zcash_script::opcode::PossiblyBad::Good(opcode)),
+        error,
+    )))
+}
+
+fn null_fail(opcode: zcash_script::Opcode) -> Error {
+    script_error(opcode, InterpreterError::PqNullFail)
+}
+
 #[test]
 fn output_carries_the_scheme_and_commits_the_exact_body() {
     let body = Code(vec![0x51]);
@@ -482,7 +493,7 @@ fn preliminary_scan_rejects_malformed_input_without_executing_it() {
 }
 
 #[test]
-fn callback_receives_the_committed_body_for_each_failed_check() {
+fn callback_receives_the_committed_body_and_a_failed_check_ends_the_spend() {
     let mut body = vec![0x76, u8::try_from(crypto::PUBLIC_KEY_BYTES).unwrap()]; // DUP argument; push key
     body.extend_from_slice(&[0; crypto::PUBLIC_KEY_BYTES]);
     body.extend_from_slice(&[0xac, 0x75, u8::try_from(crypto::PUBLIC_KEY_BYTES).unwrap()]); // CHECKSIG DROP; push key
@@ -504,11 +515,16 @@ fn callback_receives_the_committed_body_for_each_failed_check() {
         is_final: false,
     };
     let parsed = parse_output(&previous_output).unwrap().unwrap();
-    assert_eq!(parsed.verify_spend(NETWORK, &serialized, &checker), Ok(false));
-    assert_eq!(calls.get(), 2);
-    // Both signature operations in every branch are counted, before any of them runs.
+    // A non-empty signature that fails ends the spend at its first check.
+    assert_eq!(
+        parsed.verify_spend(NETWORK, &serialized, &checker),
+        Err(null_fail(zcash_script::op::CHECKSIG))
+    );
+    assert_eq!(calls.get(), 1);
+    // The body has two checks, but one signature's worth of input pays for only one.
     let selected = parsed.authenticate_spend(&serialized).unwrap();
-    assert_eq!(selected.sig_op_count(true), 2);
+    assert_eq!(pq::signature_check_count(&Code(body.clone())), 2);
+    assert_eq!(selected.sig_op_count(), 1);
     assert_eq!(selected.body(), body);
     // A changed commitment no longer authenticates the same script, a changed scheme
     // selects rules that do not exist, and a changed scheme push is not an encoding.
@@ -534,71 +550,128 @@ fn callback_receives_the_committed_body_for_each_failed_check() {
     assert_eq!(parse_output(&reframed), Ok(None));
 }
 
-#[test]
-fn shared_operation_limit_charges_failed_multisig_matches_before_verifying() {
-    // Every CHECKMULTISIG costs its own operation plus twenty keys; DROP costs
-    // one more. Nine groups fit at 198 operations, the tenth must abort before
-    // requesting any further digests, even though every signature check fails.
-    for groups in [9, 10] {
-        let mut body = Vec::new();
-        let mut arguments = Vec::new();
-        let mut signature = vec![0; crypto::SIGNATURE_BYTES];
-        signature.push(1);
-        for _ in 0..groups {
-            arguments.push(0);
-            arguments.extend(push(&signature));
-            body.push(0x51); // one required signature
-            for _ in 0..20 {
-                body.push(u8::try_from(crypto::PUBLIC_KEY_BYTES).unwrap());
-                body.extend(vec![0; crypto::PUBLIC_KEY_BYTES]);
-            }
-            body.extend([1, 20, 0xae, 0x75]); // twenty keys, CHECKMULTISIG DROP
-        }
-        body.push(0x51);
-        let calls = core::cell::Cell::new(0);
-        let sighash = |_: &Code, _: &zcash_script::signature::HashType| {
-            calls.set(calls.get() + 1);
-            None // Failed checks still consume the multisig operation allowance.
-        };
-        let transaction = CallbackTransactionSignatureChecker {
-            sighash: &sighash,
-            lock_time: 0,
-            is_final: false,
-        };
-        let serialized = input(&arguments, &body);
-        let parsed = parse_output(&output(&body).0).unwrap().unwrap();
-        let result = parsed.verify_spend(NETWORK, &serialized, &transaction);
-        if groups == 9 {
-            assert_eq!(result, Ok(true));
-            // Twenty keys are charged for each of the nine matches.
-            let selected = parsed.authenticate_spend(&serialized).unwrap();
-            assert_eq!(selected.sig_op_count(true), 180);
-        } else {
-            assert!(matches!(
-                result,
-                Err(Error::Pq(pq::Error::Script(script::Error::Interpreter(
-                    _,
-                    InterpreterError::OpCount
-                ))))
-            ));
-        }
-        assert_eq!(calls.get(), 180);
+/// A key of this scheme, from a seed made of `id`.
+fn signing_key(id: u8) -> crypto::SigningKey {
+    crypto::SigningKey::from_seed(&[id; crypto::SEED_BYTES])
+}
+
+const DIGEST: [u8; 32] = [42; 32];
+
+/// A signature by `key` over [`DIGEST`] in this network's context, with its selector.
+fn signature_by(key: &crypto::SigningKey) -> Vec<u8> {
+    let mut signature = key
+        .sign(&DIGEST, signing_context(NETWORK, PARAMETERS))
+        .unwrap();
+    signature.push(1); // SIGHASH_ALL
+    signature
+}
+
+fn fixed_digest(_: &Code, _: &zcash_script::signature::HashType) -> Option<[u8; 32]> {
+    Some(DIGEST)
+}
+
+/// Verifies `arguments` (already serialized) against the output committing to `body`,
+/// with every digest [`DIGEST`]. Returns the result and the spend's signature-check count.
+fn spend(arguments: &[u8], body: &[u8]) -> (Result<bool, Error>, u32) {
+    let checker = CallbackTransactionSignatureChecker {
+        sighash: &fixed_digest,
+        lock_time: 0,
+        is_final: false,
+    };
+    let serialized = input(arguments, body);
+    let parsed = parse_output(&output(body).0).unwrap().unwrap();
+    let count = parsed.authenticate_spend(&serialized).unwrap().sig_op_count();
+    (parsed.verify_spend(NETWORK, &serialized, &checker), count)
+}
+
+/// `<K1> CHECKSIG <K2> CHECKSIGADD ... <Kn> CHECKSIGADD <required> NUMEQUAL`.
+fn threshold_body(keys: &[crypto::SigningKey], required: u8) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (index, key) in keys.iter().enumerate() {
+        body.extend(push(&key.public_key()));
+        body.push(if index == 0 { 0xac } else { pq::OP_CHECKSIGADD });
     }
+    body.push(0x50 + required);
+    body.push(0x9c); // NUMEQUAL
+    body
 }
 
 #[test]
-fn multisig_rejects_more_than_twenty_keys_before_requesting_a_digest() {
-    let mut body = vec![0];
-    for _ in 0..21 {
-        body.push(u8::try_from(crypto::PUBLIC_KEY_BYTES).unwrap());
-        body.extend(vec![0; crypto::PUBLIC_KEY_BYTES]);
+fn a_two_of_three_checksigadd_spend_runs_two_checks() {
+    let keys = [1, 2, 3].map(signing_key);
+    let body = threshold_body(&keys, 2);
+    // The first key's slot is on top, so the arguments go in reverse key order.
+    let slots = |signers: [bool; 3]| -> Vec<u8> {
+        signers
+            .iter()
+            .zip(&keys)
+            .rev()
+            .flat_map(|(signs, key)| if *signs { push(&signature_by(key)) } else { vec![0x00] })
+            .collect()
+    };
+    for signers in [[true, true, false], [true, false, true], [false, true, true]] {
+        assert_eq!(spend(&slots(signers), &body), (Ok(true), 2), "{signers:?}");
     }
-    body.extend([1, 21, 0xae]);
-    assert!(matches!(
-        check(&[0], &body),
-        Err(Error::Pq(pq::Error::Script(script::Error::Interpreter(
-            _,
-            InterpreterError::PubKeyCount(_)
-        ))))
-    ));
+    // One signature is not enough, and costs one check.
+    assert_eq!(spend(&slots([false, false, true]), &body), (Ok(false), 1));
+    // A signature in another key's slot is a failed signature, which ends the spend.
+    let mut swapped = vec![0x00];
+    swapped.extend(push(&signature_by(&keys[0])));
+    swapped.extend(push(&signature_by(&keys[1])));
+    assert_eq!(
+        spend(&swapped, &body).0,
+        Err(null_fail(zcash_script::op::CHECKSIG))
+    );
 }
+
+#[test]
+fn a_copied_real_signature_needs_another_signatures_worth_of_bytes() {
+    let key = signing_key(1);
+    // SWAP DROP, then DUP <K> CHECKSIGVERIFY <K> CHECKSIG: one signature, two checks,
+    // and a junk argument below it the body discards.
+    let mut body = vec![0x7c, 0x75, 0x76];
+    body.extend(push(&key.public_key()));
+    body.push(0xad);
+    body.extend(push(&key.public_key()));
+    body.push(0xac);
+    let signature = push(&signature_by(&key));
+    let arguments = |junk: usize| {
+        let mut arguments = push(&vec![0xee; junk]);
+        arguments.extend_from_slice(&signature);
+        arguments
+    };
+    let two_checks = 2 * crypto::SIGNATURE_BYTES;
+    let junk = (1..crypto::SIGNATURE_BYTES)
+        .find(|&junk| input(&arguments(junk), &body).len() >= two_checks)
+        .unwrap();
+    assert_eq!(input(&arguments(junk), &body).len(), two_checks);
+    assert_eq!(spend(&arguments(junk), &body), (Ok(true), 2));
+    // One byte short of paying for the copy: the second check is refused before it runs.
+    assert_eq!(
+        spend(&arguments(junk - 1), &body),
+        (
+            Err(script_error(
+                zcash_script::op::CHECKSIG,
+                InterpreterError::PqCheckBudget
+            )),
+            1
+        )
+    );
+}
+
+#[test]
+fn multisig_opcodes_are_refused_even_where_they_never_run() {
+    let key = signing_key(1);
+    // <K> CHECKSIG 0 IF CHECKMULTISIG ENDIF: a valid single-signer spend with a multisig
+    // in a branch that never executes.
+    let mut body = push(&key.public_key());
+    body.extend([0xac, 0x00, 0x63, 0xae, 0x68]);
+    assert_eq!(
+        spend(&push(&signature_by(&key)), &body).0,
+        Err(script_error(
+            zcash_script::op::CHECKMULTISIG,
+            InterpreterError::PqMultisig
+        ))
+    );
+}
+
