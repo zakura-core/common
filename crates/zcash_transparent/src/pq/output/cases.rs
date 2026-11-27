@@ -154,13 +154,23 @@ fn output_carries_the_scheme_and_commits_the_exact_body() {
     assert_eq!(check(&[], &body.0), Ok(true));
 
     // A different body is a different commitment, so the original output rejects it.
-    let equivalent = Code(vec![0x01, 0x01]);
+    let equivalent = Code(vec![0x61, 0x51]); // NOP 1
     assert_eq!(
         check_output(&script, &input(&[], &equivalent.0)),
         Err(Error::CommitmentMismatch)
     );
     // Committing to those bytes in the output authenticates them instead.
     assert_eq!(check(&[], &equivalent.0), Ok(true));
+    // A body spells its own pushes the shortest way too: one committing to a longer
+    // spelling of 1 can never be spent, so a wallet must write bodies minimally.
+    let long_form = Code(vec![0x01, 0x01]);
+    assert!(matches!(
+        check(&[], &long_form.0),
+        Err(Error::Pq(pq::Error::Script(script::Error::Interpreter(
+            _,
+            InterpreterError::MinimalData
+        ))))
+    ));
 
     // Under the unchanged legacy rules this output is three pushes that leave the truthy
     // commitment on top, so it is satisfied by an *empty* scriptSig: the format is

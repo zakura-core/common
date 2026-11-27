@@ -100,6 +100,12 @@ pub enum Error {
     #[error("non-empty PQ signature failed")]
     PqNullFail,
 
+    /// A PQ `IF` or `NOTIF` was given something other than an empty item or `0x01`, so a
+    /// third party could have swapped it for another value of the same truth.
+    #[cfg(feature = "pq")]
+    #[error("PQ IF/NOTIF argument must be empty or 0x01")]
+    PqMinimalIf,
+
     // softfork safeness
     #[error("discouraged upgradable NOP encountered")]
     DiscourageUpgradableNOPs,

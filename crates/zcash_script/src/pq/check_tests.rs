@@ -383,6 +383,17 @@ fn checksigadd_counts_signers_and_checks_its_operands() {
             interpreter::Error::Num(_)
         )))
     ));
+    // n is minimally encoded, so a count taken from the input has one spelling.
+    let mut from_input = push(&key(1));
+    from_input.extend([OP_CHECKSIGADD, number(1), NUMEQUAL]);
+    assert_eq!(run(&[sig(1), vec![]], &from_input), (Ok(true), 1));
+    assert!(matches!(
+        run(&[sig(1), vec![0x00]], &from_input).0,
+        Err(Error::Script(script::Error::Interpreter(
+            _,
+            interpreter::Error::Num(_)
+        )))
+    ));
     // A malformed key aborts, as for CHECKSIG.
     let mut bad_key = vec![0x00];
     bad_key.extend(push(&[1; KEY - 1]));

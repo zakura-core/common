@@ -9,10 +9,19 @@
 //! opcode parser and shared execution loop. These provisional harness limits are not proposed
 //! consensus limits; transaction/block work and relay qualification remain separate.
 //!
-//! Unlike the legacy evaluator, this one requires a canonical input: every pushed item uses
-//! its shortest encoding, and execution must end with exactly one item on the stack. Both
-//! deny a third party cheap, identifier-preserving edits to someone else's spend, because
-//! ZIP 244 leaves the serialized input out of the transaction identifier.
+//! Unlike the legacy evaluator, this one requires a canonical input, because ZIP 244 leaves
+//! the serialized input out of the transaction identifier and a third party could otherwise
+//! edit someone else's spend and keep it valid:
+//!
+//! - every pushed item, in the input and the script, uses its shortest encoding;
+//! - every item read as a number is minimally encoded, so `1` has one spelling;
+//! - `IF` and `NOTIF` take only an empty item or `0x01`, so a true `OP_1` cannot become
+//!   `OP_2`, nor a false `OP_0` a pushed `0x00` or `0x80` (Bitcoin's `MINIMALIF`);
+//! - execution ends with exactly one item on the stack.
+//!
+//! An item a script reads only for its truth elsewhere, through `VERIFY`, `IFDUP` or as the
+//! final result, is not constrained; a script that takes such an item from its input
+//! accepts every value of the same truth.
 //!
 //! The signature checks a spend may run are bounded by its size. A legacy script can check
 //! one signature many times, by copying it or through the key trials of `CHECKMULTISIG`,
@@ -37,7 +46,7 @@ use crate::{
     Opcode,
     interpreter::{self, Flags, SignatureChecker, Stack},
     num,
-    opcode::{self, Bad, Evaluable as _, Operation, PossiblyBad, PushValue},
+    opcode::{self, Bad, Control, Evaluable as _, Operation, PossiblyBad, PushValue},
     script, signature,
 };
 
@@ -221,6 +230,21 @@ impl opcode::Evaluable for Instruction {
         mut state: interpreter::State,
     ) -> Result<interpreter::State, interpreter::Error> {
         match self {
+            Self::Shared(
+                op @ PossiblyBad::Good(Opcode::Control(Control::OP_IF | Control::OP_NOTIF)),
+            ) => {
+                // Only an executed IF reads its argument; a missing one is the shared
+                // evaluator's error to report.
+                if interpreter::should_exec(&state.vexec)
+                    && state
+                        .stack
+                        .rget(0)
+                        .is_ok_and(|argument| !matches!(argument.as_slice(), [] | [1]))
+                {
+                    return Err(interpreter::Error::PqMinimalIf);
+                }
+                op.eval(flags, script, checker, state)
+            }
             Self::Shared(op) => op.eval(flags, script, checker, state),
             Self::CheckSigAdd => {
                 // An operation like any other, counted whether or not its branch executes.
@@ -485,10 +509,10 @@ pub fn eval_script(
                 .map_err(script::Error::Opcode)
                 .and_then(Instruction::restrict)
         }),
-        // Locktimes have to mean what they say. Every other legacy flag is either specific
-        // to ECDSA or multisig, relay policy, or a rule this evaluator already applies
-        // unconditionally.
-        Flags::CHECKLOCKTIMEVERIFY,
+        // Locktimes have to mean what they say, and numbers and the script's own pushes
+        // have one encoding each. Every other legacy flag is either specific to ECDSA or
+        // multisig, relay policy, or a rule this evaluator already applies unconditionally.
+        Flags::CHECKLOCKTIMEVERIFY | Flags::MinimalData,
         program,
         arguments(input)?,
         &checker,
@@ -809,6 +833,77 @@ mod tests {
                 NO_CHECKS,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn a_third_party_cannot_respell_an_if_argument_or_a_number() {
+        let error = |input: &[u8], program: &[u8]| match eval_script(
+            input,
+            &script::Code(program.to_vec()),
+            &NullSignatureChecker(),
+            NO_CHECKS,
+        ) {
+            Err(Error::Script(script::Error::Interpreter(_, error))) => Some(error),
+            _ => None,
+        };
+        // IF 1 ELSE 1 ENDIF: both branches pass, so under legacy rules any argument does,
+        // and a third party could respell the spender's choice without invalidating it.
+        for opcode in [0x63, 0x64] {
+            let program = [opcode, 0x51, 0x67, 0x51, 0x68];
+            for canonical in [&[0x00][..], &[0x51]] {
+                let run = eval_script(
+                    canonical,
+                    &script::Code(program.to_vec()),
+                    &NullSignatureChecker(),
+                    NO_CHECKS,
+                );
+                assert_eq!(run, Ok(true));
+            }
+            for respelled in [
+                &[0x52][..],
+                &[0x60],
+                &[0x4f],
+                &[0x01, 0x00],
+                &[0x01, 0x80],
+                &[0x02, 0x01, 0x00],
+            ] {
+                assert_eq!(
+                    error(respelled, &program),
+                    Some(interpreter::Error::PqMinimalIf),
+                    "{opcode:#x} with {respelled:?}"
+                );
+            }
+        }
+        // An IF that does not execute reads nothing, so its would-be argument is not judged.
+        assert_eq!(
+            eval_script(
+                &[],
+                &script::Code(vec![0x00, 0x63, 0x52, 0x63, 0x68, 0x68, 0x51]),
+                &NullSignatureChecker(),
+                NO_CHECKS
+            ),
+            Ok(true)
+        );
+        // A number from the input has one spelling: 1 is OP_1, not 0x01 0x00.
+        let one_equals = [0x51, 0x9c];
+        assert_eq!(
+            eval_script(
+                &[0x51],
+                &script::Code(one_equals.to_vec()),
+                &NullSignatureChecker(),
+                NO_CHECKS
+            ),
+            Ok(true)
+        );
+        assert!(matches!(
+            error(&[0x02, 0x01, 0x00], &one_equals),
+            Some(interpreter::Error::Num(_))
+        ));
+        // And the committed script spells its own pushes the shortest way.
+        assert_eq!(
+            error(&[], &[0x4c, 0x01, 0x20, 0x75, 0x51]),
+            Some(interpreter::Error::MinimalData)
         );
     }
 }
