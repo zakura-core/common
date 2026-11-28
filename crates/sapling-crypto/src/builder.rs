@@ -1467,7 +1467,7 @@ mod tests {
     fn local_and_external_signatures_follow_final_spend_order() {
         use super::{Error, ExtendedSpendingKey};
         use crate::{
-            CommitmentTree, IncrementalWitness, Node, Rseed,
+            CommitmentTree, Diversifier, IncrementalWitness, Node, Rseed,
             bundle::SignatureDigests,
             value::{CommitmentSum, NoteValue},
         };
@@ -1477,8 +1477,9 @@ mod tests {
             ExtendedSpendingKey::master(&[2; 32]),
         ];
         let notes = keys.each_ref().map(|key| {
-            key.default_address()
-                .1
+            key.to_diversifiable_full_viewing_key()
+                .diversified_address(Diversifier([0; 11]))
+                .expect("the all-zero Sapling diversifier is valid")
                 .create_note(NoteValue::from_raw(1), Rseed::AfterZip212([3; 32]))
         });
         let [first, second] = notes.each_ref().map(|note| Node::from_cmu(&note.cmu()));
