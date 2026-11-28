@@ -257,6 +257,28 @@ fn identifiers_must_round_trip_through_compact_size() {
 }
 
 #[test]
+fn sparse_maps_align_by_bundle_type() {
+    let deltas = vec![delta(1, 0, 1), delta(4, 2, -1), delta(9, 1, 1)];
+    let effects = vec![data(2, 1, &[]), data(4, 2, &[]), data(7, 0, &[])];
+    let mut auths = vec![data(4, 2, &[]), data(7, 0, &[])];
+    assert!(Envelope::new(header(), deltas.clone(), effects.clone(), auths.clone()).is_ok());
+
+    // After the effects run out, a matching delta alone cannot authorize a bundle.
+    auths.push(data(9, 1, &[]));
+    assert_eq!(
+        Envelope::new(header(), deltas.clone(), effects.clone(), auths.clone()),
+        Err(EnvelopeError::AuthWithoutEffect(BundleType::new(9)))
+    );
+
+    // The delta and authorization must agree on the variant even without an effect.
+    auths.last_mut().unwrap().bundle.variant = BundleVariant::new(2);
+    assert_eq!(
+        Envelope::new(header(), deltas, effects, auths),
+        Err(EnvelopeError::InconsistentVariant(BundleType::new(9)))
+    );
+}
+
+#[test]
 fn large_maps_are_checked_in_linear_time() {
     // About 100k entries per map, the order of what a 2 MB block allows. A quadratic
     // check would take minutes here.
