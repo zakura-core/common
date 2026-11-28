@@ -146,10 +146,8 @@ impl Envelope {
     ///
     /// - a transparent, Sapling, Orchard or Ironwood bundle is not empty;
     /// - each transparent output value is in {0 .. `MAX_MONEY`};
-    /// - the coinbase `blockHeight` is in {1 .. 499999999}, `blockSubsidy` and
-    ///   `lockboxValue` are at most `MAX_MONEY`, `lockboxValue` is at most
-    ///   `blockSubsidy`, `coinbaseData` is at most 94 bytes, and the miner signals are in
-    ///   strictly ascending order;
+    /// - coinbase fields must have their exact encoding; their accounting, height and
+    ///   miner signal validity are checked only when constructing a typed transaction;
     /// - the Sapling `cmu` and `rk`, and the Orchard and Ironwood `nullifier`, `cmx`,
     ///   `cv` and `rk`, are canonical encodings of field elements or valid points.
     ///

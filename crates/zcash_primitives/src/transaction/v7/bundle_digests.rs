@@ -25,7 +25,7 @@ use blake2b_simd::Hash as Blake2bHash;
 use orchard::ValuePool;
 
 use super::{
-    coinbase::CoinbaseBundle,
+    coinbase,
     envelope::{BundleData, MapKind},
     registry::BundleId,
     transparent,
@@ -54,9 +54,11 @@ pub(super) fn effects_digest(effect: &BundleData) -> Option<Result<[u8; 32], Inv
         BundleId::TRANSPARENT => decode(effect, MapKind::EffectBundles, |r| {
             transparent::Effects::read(r).map(|effects| effects.effects_digest())
         }),
-        BundleId::COINBASE => decode(effect, MapKind::EffectBundles, |r| {
-            CoinbaseBundle::read(r).map(|coinbase| coinbase.effects_digest())
-        }),
+        BundleId::COINBASE => decode(
+            effect,
+            MapKind::EffectBundles,
+            coinbase::encoded_effects_digest,
+        ),
         BundleId::SAPLING => decode(effect, MapKind::EffectBundles, |r| {
             sapling_serialization::V7Effects::read(r).map(|effects| effects.effects_digest())
         }),

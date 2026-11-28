@@ -124,7 +124,7 @@ def transparent_effects_digest(payload):
     return H(b"ZTxIdTranspaHash", prevouts + sequence + outs)
 
 
-def coinbase_effects_digest(payload):
+def coinbase_effects_digest(payload, check_values=False):
     r = R(payload)
     height = r.u32()
     subsidy = r.u64()
@@ -134,9 +134,10 @@ def coinbase_effects_digest(payload):
     signals = r.take(2 * n)
     poll = r.take(16) if n > 0 else b""
     r.done()
-    assert 1 <= height <= 499999999 and lockbox <= subsidy and len(data) <= 94
-    codes = signals[0::2]
-    assert all(codes[i] < codes[i + 1] for i in range(len(codes) - 1))
+    if check_values:
+        assert 1 <= height <= 499999999 and lockbox <= subsidy and len(data) <= 94
+        codes = signals[0::2]
+        assert all(codes[i] < codes[i + 1] for i in range(len(codes) - 1))
     preimage = (struct.pack("<I", height) + struct.pack("<Q", subsidy) + struct.pack("<Q", lockbox)
                 + cs(len(data)) + data + cs(n) + signals + poll)
     return H(b"ZTxIdCoinbasHash", preimage)
@@ -304,6 +305,7 @@ def check_plausible(tx, amounts):
     output_values = sum(struct.unpack("<q", out[:8])[0] for out in outputs)
     assert delta.get(0, 0) == sum(amounts) - output_values, "transparent delta"
     if 1 in payloads:
+        coinbase_effects_digest(payloads[1], check_values=True)
         assert not inputs, "a coinbase transaction has transparent inputs"
         assert delta.get(5, 0) >= 0, "a coinbase transaction pays a fee"
         if 2 in payloads:

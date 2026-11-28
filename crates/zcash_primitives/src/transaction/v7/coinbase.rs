@@ -175,32 +175,19 @@ impl CoinbaseBundle {
         self.miner_poll.as_ref()
     }
 
-    /// Reads the coinbase effecting data.
-    pub(crate) fn read<R: Read>(mut reader: R) -> io::Result<Self> {
-        let block_height = BlockHeight::from_u32(reader.read_u32_le()?);
-        let block_subsidy = read_zatoshis(&mut reader)?;
-        let lockbox_value = read_zatoshis(&mut reader)?;
-        let coinbase_data = Vector::read_bytes(&mut reader)?;
-        let signals = Vector::read(&mut reader, |r| {
-            let mut signal = [0; 2];
-            r.read_exact(&mut signal)?;
-            Ok(MinerSignal {
-                signal_code: signal[0],
-                level_of_support: signal[1],
-            })
-        })?;
-        let miner_poll = if signals.is_empty() {
-            None
-        } else {
-            let mut poll_digest = [0; 16];
-            reader.read_exact(&mut poll_digest)?;
-            Some(MinerPoll::new(signals, poll_digest).map_err(invalid)?)
-        };
+    /// Reads and validates a typed coinbase bundle.
+    pub(crate) fn read<R: Read>(reader: R) -> io::Result<Self> {
+        let fields = EncodedCoinbase::read(reader)?;
+        let miner_poll = fields
+            .poll_digest
+            .map(|digest| MinerPoll::new(fields.signals, digest))
+            .transpose()
+            .map_err(invalid)?;
         Self::new(
-            block_height,
-            block_subsidy,
-            lockbox_value,
-            coinbase_data,
+            fields.block_height.into(),
+            amount(fields.block_subsidy)?,
+            amount(fields.lockbox_value)?,
+            fields.coinbase_data,
             miner_poll,
         )
         .map_err(invalid)
@@ -232,8 +219,59 @@ impl CoinbaseBundle {
     }
 }
 
-fn read_zatoshis<R: Read>(mut reader: R) -> io::Result<Zatoshis> {
-    Zatoshis::from_u64(reader.read_u64_le()?)
+/// The fields needed to delimit a coinbase payload, before consensus checks.
+struct EncodedCoinbase {
+    block_height: u32,
+    block_subsidy: u64,
+    lockbox_value: u64,
+    coinbase_data: Vec<u8>,
+    signals: Vec<MinerSignal>,
+    poll_digest: Option<[u8; 16]>,
+}
+
+impl EncodedCoinbase {
+    fn read<R: Read>(mut reader: R) -> io::Result<Self> {
+        let block_height = reader.read_u32_le()?;
+        let block_subsidy = reader.read_u64_le()?;
+        let lockbox_value = reader.read_u64_le()?;
+        let coinbase_data = Vector::read_bytes(&mut reader)?;
+        let signals = Vector::read(&mut reader, |r| {
+            let mut signal = [0; 2];
+            r.read_exact(&mut signal)?;
+            Ok(MinerSignal {
+                signal_code: signal[0],
+                level_of_support: signal[1],
+            })
+        })?;
+        let poll_digest = if signals.is_empty() {
+            None
+        } else {
+            let mut digest = [0; 16];
+            reader.read_exact(&mut digest)?;
+            Some(digest)
+        };
+        Ok(Self {
+            block_height,
+            block_subsidy,
+            lockbox_value,
+            coinbase_data,
+            signals,
+            poll_digest,
+        })
+    }
+}
+
+/// T.3.1 hashes the canonical wire fields, including both CompactSize prefixes.
+pub(super) fn encoded_effects_digest(reader: &mut &[u8]) -> io::Result<Blake2bHash> {
+    let bytes = *reader;
+    EncodedCoinbase::read(&mut *reader)?;
+    let mut h = hasher(COINBASE_PERSONALIZATION);
+    h.write_all(&bytes[..bytes.len() - reader.len()])?;
+    Ok(h.finalize())
+}
+
+fn amount(value: u64) -> io::Result<Zatoshis> {
+    Zatoshis::from_u64(value)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "coinbase value is out of range"))
 }
 

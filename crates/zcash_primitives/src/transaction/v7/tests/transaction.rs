@@ -1189,6 +1189,40 @@ fn hand_written_bundle_lists_follow_the_registry() {
 }
 
 #[test]
+fn coinbase_digest_precedes_accounting_validation() {
+    let bytes = hex::decode(super::vectors::TEST_VECTORS[MINIMAL_COINBASE].tx).unwrap();
+    let (header, deltas, mut effects, auth) = Envelope::read(&bytes[..]).unwrap().into_parts();
+    let cb = effects
+        .iter_mut()
+        .find(|b| b.bundle == BundleId::COINBASE)
+        .unwrap();
+    cb.data[4..12].copy_from_slice(&0u64.to_le_bytes());
+    cb.data[12..20].copy_from_slice(&1u64.to_le_bytes());
+    let envelope = Envelope::new(header, deltas, effects, auth).unwrap();
+    let actual = envelope.txid(|_| None).unwrap();
+    let mut wire = Vec::new();
+    envelope.write(&mut wire).unwrap();
+    assert!(Transaction::read(&wire[..], BranchId::Nu7_1).is_err());
+    // Independently computed by the ZIP 248 Python oracle.
+    assert_eq!(
+        hex::encode(actual.as_ref()),
+        "4de2d59b335556944ee6a71f0d1c56dff1be49aa0dae37895ee31082719eb3ce"
+    );
+    let (header, deltas, mut effects, auth) = envelope.into_parts();
+    let cb = effects
+        .iter_mut()
+        .find(|b| b.bundle == BundleId::COINBASE)
+        .unwrap();
+    cb.data.pop();
+    assert!(
+        Envelope::new(header, deltas, effects, auth)
+            .unwrap()
+            .txid(|_| None)
+            .is_err()
+    );
+}
+
+#[test]
 fn typed_expiry_height_boundaries() {
     let bytes = hex::decode(super::vectors::TEST_VECTORS[MINIMAL_COINBASE].tx).unwrap();
     let tx = Transaction::read(&bytes[..], BranchId::Nu7_1).unwrap();
