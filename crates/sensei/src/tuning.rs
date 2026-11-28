@@ -116,6 +116,15 @@ pub(crate) const VERIFY_FOLD_MIN_ACTIONS: usize = 2;
 /// holds.
 pub(crate) const VERIFY_MSM_MIN_TERMS: usize = 128;
 
+/// The term count below which Udon evaluates a multiscalar multiplication on
+/// one thread whatever its task budget. A RedPallas batch equation shorter
+/// than this is given to the workers as runs of its terms; one at least this
+/// long is left to Udon, which distributes it itself. Keep it equal to Udon's
+/// floor: a smaller value leaves the equations between the two on one thread,
+/// and a larger one takes work from the method that distributes it better.
+#[cfg(all(feature = "multicore", any(feature = "prover", feature = "verifier")))]
+pub(crate) const REDPALLAS_SERIAL_BELOW_TERMS: usize = 128;
+
 // Bounded idle verification scratch, retained across calls. Each verification
 // call leases per-chunk equation scratch and, for its final MSM, one
 // workspace, and returns them — on success and on error — to process-wide
