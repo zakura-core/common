@@ -60,9 +60,8 @@ prop_compose! {
         transparent in arb_zat_balance(),
         coinbase in arb_zat_balance(),
         fee in arb_zat_balance(),
-        nsm in arb_zat_balance(),
     ) -> ValueDeltas {
-        ValueDeltas { transparent, coinbase, fee, nsm }
+        ValueDeltas { transparent, coinbase, fee }
     }
 }
 

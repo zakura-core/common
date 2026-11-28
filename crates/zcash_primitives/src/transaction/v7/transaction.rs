@@ -2,9 +2,10 @@
 //!
 //! [`TransactionData`] represents the bundles ZIP 248 registers. Decoding rejects a
 //! transaction it cannot represent: one with an unregistered pair, an entry in a map
-//! the registry forbids for that pair, a bundle without the authorizing data it needs, or
-//! a signature that does not use sighash variant 0. Such a transaction can still be
-//! parsed with [`Envelope::read`], and identified with [`Envelope::txid`].
+//! the registry forbids for that pair, a registered bundle that its consensus branch is
+//! assumed not to activate (the ZIP 233 bundle), a bundle without the authorizing data it
+//! needs, or a signature that does not use sighash variant 0. Such a transaction can
+//! still be parsed with [`Envelope::read`], and identified with [`Envelope::txid`].
 //!
 //! Decoding also enforces the other ZIP 248 bundle-local rules: those on each bundle's own
 //! fields, such as the coinbase bundle's, and those [`TransactionData::from_parts_v7`]
@@ -13,6 +14,8 @@
 //! under `zcash_script`'s `Flags::SigHashAllOnly` can check. Decoding leaves the rules
 //! that relate bundles to each other's values or to the chain to full validators: for
 //! example, that the deltas balance, and the sign of the fee.
+//! [`TransactionData::check_v7_transaction_rules`] checks those of them that need only
+//! the transaction.
 
 use alloc::vec::Vec;
 use corez::io::{self, Read, Write};
@@ -70,7 +73,13 @@ fn from_envelope(envelope: Envelope) -> io::Result<TransactionData<Authorized>> 
             BundleId::ORCHARD => &mut shielded.orchard,
             BundleId::IRONWOOD => &mut shielded.ironwood,
             BundleId::FEE => &mut value_deltas.fee,
-            BundleId::NSM => &mut value_deltas.nsm,
+            // ZIP 233 registers this bundle, but NU7.1 is assumed not to activate it, and
+            // a positive delta would create value.
+            BundleId::NSM => {
+                return Err(rule_violation(BundleRuleError::InactiveBundle(
+                    delta.bundle.bundle_type,
+                )));
+            }
             _ => unreachable!("check_registered accepts only registered pairs"),
         } = value;
     }
