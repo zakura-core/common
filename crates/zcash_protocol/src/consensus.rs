@@ -695,6 +695,18 @@ const UPGRADES_IN_ORDER: &[NetworkUpgrade] = &[
     NetworkUpgrade::Nu7_1,
 ];
 
+/// Returns the first height governed by NU7 or a later upgrade, or `None` if
+/// none are scheduled. Use this for rules inherited from NU7 on local networks
+/// that can activate a successor without scheduling NU7 separately.
+pub fn nu7_activation_height<P: Parameters>(params: &P) -> Option<BlockHeight> {
+    UPGRADES_IN_ORDER
+        .iter()
+        .copied()
+        .skip_while(|upgrade| *upgrade != NetworkUpgrade::Nu7)
+        .filter_map(|upgrade| params.activation_height(upgrade))
+        .min()
+}
+
 /// The "grace period" defined in [ZIP 212].
 ///
 /// [ZIP 212]: https://zips.z.cash/zip-0212#changes-to-the-process-of-receiving-sapling-or-orchard-notes

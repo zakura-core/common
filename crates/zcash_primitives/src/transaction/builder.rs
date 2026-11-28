@@ -69,7 +69,7 @@ pub fn default_tx_expiry_delta<P: consensus::Parameters>(
     params: &P,
     target_height: BlockHeight,
 ) -> u32 {
-    if params.is_nu_active(consensus::NetworkUpgrade::Nu7, target_height) {
+    if consensus::nu7_activation_height(params).is_some_and(|h| h <= target_height) {
         NU7_DEFAULT_TX_EXPIRY_DELTA
     } else {
         PRE_NU7_DEFAULT_TX_EXPIRY_DELTA
@@ -87,7 +87,7 @@ pub fn check_shielded_budget<P: consensus::Parameters>(
     orchard_actions: usize,
     ironwood_actions: usize,
 ) -> Result<(), &'static str> {
-    if !params.is_nu_active(consensus::NetworkUpgrade::Nu7, target_height) {
+    if consensus::nu7_activation_height(params).is_none_or(|h| target_height < h) {
         return Ok(());
     }
     let sapling = sapling_spends
@@ -2054,6 +2054,37 @@ mod tests {
         not(feature = "transparent-inputs")
     ))]
     use {crate::transaction::TxVersion, zcash_protocol::consensus::BranchId};
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn nu7_policy_starts_at_the_first_nu7_or_later_upgrade() {
+        use zcash_protocol::zip318::BlockSpacing;
+
+        let activation = 12u32.into();
+        for (nu7, nu7_1) in [
+            (None, Some(activation)),
+            (Some(activation), Some(activation)),
+            (Some(activation), Some(activation + 1)),
+            (Some(activation + 1), Some(activation)),
+        ] {
+            let mut network = nu7_test_network();
+            network.nu7 = nu7;
+            network.nu7_1 = nu7_1;
+            let spacing = BlockSpacing::for_network(&network);
+            for (height, expiry, ratio, within_budget) in [
+                (activation - 1, 40, 1, true),
+                (activation, 120, 3, false),
+                (activation + 1, 120, 3, false),
+            ] {
+                assert_eq!(super::default_tx_expiry_delta(&network, height), expiry);
+                assert_eq!(spacing.blocks_per_reference_block(height), ratio);
+                assert_eq!(
+                    super::check_shielded_budget(&network, height, 0, 0, 331, 0).is_ok(),
+                    within_budget
+                );
+            }
+        }
+    }
 
     #[test]
     #[cfg(feature = "circuits")]
