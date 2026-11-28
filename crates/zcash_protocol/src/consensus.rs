@@ -56,6 +56,15 @@ pub const NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT: usize = 330;
 /// [ZIP 218]: https://zips.z.cash/zip-0218#shielded-pool-action-limits
 pub const NU7_GLOBAL_SHIELDED_BUDGET: usize = 330;
 
+/// Target spacing in seconds from the ZIP 223 activation.
+pub const NU7_1_TARGET_SPACING: u32 = 20;
+/// ZIP 223 limit on Sapling spends plus outputs per block.
+pub const NU7_1_SAPLING_BLOCK_IO_LIMIT: usize = 240;
+/// ZIP 223 limit on actions in each of the Orchard and Ironwood pools.
+pub const NU7_1_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT: usize = 264;
+/// ZIP 223 limit on the combined shielded cost per block.
+pub const NU7_1_GLOBAL_SHIELDED_BUDGET: usize = 264;
+
 impl BlockHeight {
     pub const fn from_u32(v: u32) -> BlockHeight {
         BlockHeight(v)
