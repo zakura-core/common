@@ -860,9 +860,8 @@ fn check_roundtrip(tx: Transaction) -> Result<(), TestCaseError> {
     let txo = Transaction::read(&txn_bytes[..], tx.consensus_branch_id).unwrap();
 
     prop_assert_eq!(tx.v7_fields(), txo.v7_fields());
-    // The generator gives each Sapling spend its own anchor, but every format encodes one
-    // anchor for all spends, and v5 transaction IDs commit to each spend's anchor. From v6
-    // on the anchor is authorizing data, so these formats round-trip exactly.
+    // The v5 generator may give spends different anchors even though the wire format
+    // encodes one shared anchor. From v6 onward the anchor is authorizing data.
     if matches!(tx.version, TxVersion::V6 | TxVersion::V7) {
         prop_assert_eq!(tx.txid(), txo.txid());
         prop_assert_eq!(tx.auth_commitment(), txo.auth_commitment());
@@ -873,6 +872,16 @@ fn check_roundtrip(tx: Transaction) -> Result<(), TestCaseError> {
     // The envelope digests decode each payload on its own, and reach the digest functions
     // the typed digesters use from those payloads, so they must agree.
     if tx.version == TxVersion::V7 {
+        if let Some(bundle) = tx.sapling_bundle() {
+            let decoded = txo.sapling_bundle().unwrap();
+            prop_assert!(
+                bundle
+                    .shielded_spends()
+                    .iter()
+                    .map(|s| s.anchor())
+                    .eq(decoded.shielded_spends().iter().map(|s| s.anchor()))
+            );
+        }
         let envelope = super::v7::Envelope::read(&txn_bytes[..]).unwrap();
         prop_assert_eq!(envelope.txid(|_| None).unwrap(), tx.txid());
         prop_assert_eq!(

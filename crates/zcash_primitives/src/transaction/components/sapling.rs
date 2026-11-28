@@ -714,7 +714,7 @@ pub mod testing {
     use proptest::prelude::*;
 
     use crate::transaction::TxVersion;
-    use ::sapling::bundle::{Authorized, Bundle, testing as t_sap};
+    use ::sapling::bundle::{Authorized, Bundle, SpendDescription, testing as t_sap};
     use zcash_protocol::value::{ZatBalance, testing::arb_zat_balance};
 
     prop_compose! {
@@ -727,10 +727,48 @@ pub mod testing {
         }
     }
 
+    pub(crate) fn spend_with_anchor(
+        spend: &SpendDescription<Authorized>,
+        anchor: jubjub::Base,
+    ) -> SpendDescription<Authorized> {
+        SpendDescription::from_parts(
+            spend.cv().clone(),
+            anchor,
+            *spend.nullifier(),
+            *spend.rk(),
+            *spend.zkproof(),
+            *spend.spend_auth_sig(),
+        )
+    }
+
     pub fn arb_bundle_for_version(
         v: TxVersion,
     ) -> impl Strategy<Value = Option<Bundle<Authorized, ZatBalance>>> {
-        if v.has_sapling() {
+        if v == TxVersion::V7 {
+            // The v7 wire format has one anchor for every spend in the bundle.
+            arb_bundle()
+                .prop_map(|bundle| {
+                    bundle.map(|bundle| {
+                        let Some((first, rest)) = bundle.shielded_spends().split_first() else {
+                            return bundle;
+                        };
+                        let spends = core::iter::once(first.clone())
+                            .chain(
+                                rest.iter()
+                                    .map(|spend| spend_with_anchor(spend, *first.anchor())),
+                            )
+                            .collect();
+                        Bundle::from_parts(
+                            spends,
+                            bundle.shielded_outputs().to_vec(),
+                            *bundle.value_balance(),
+                            *bundle.authorization(),
+                        )
+                        .expect("the bundle has a spend")
+                    })
+                })
+                .boxed()
+        } else if v.has_sapling() {
             Strategy::boxed(arb_bundle())
         } else {
             Strategy::boxed(Just(None))

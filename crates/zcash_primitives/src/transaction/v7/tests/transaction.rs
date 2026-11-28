@@ -875,6 +875,47 @@ fn from_parts_v7_enforces_the_bundle_local_rules() {
     );
 }
 
+#[test]
+fn mixed_sapling_anchors_are_rejected_at_construction_and_freeze() {
+    let bytes = hex::decode(super::vectors::TEST_VECTORS[DESHIELDING].tx.as_bytes()).unwrap();
+    let tx = Transaction::read(&bytes[..], BranchId::Nu7_1)
+        .unwrap()
+        .into_data();
+    let bundle = tx.sapling_bundle().unwrap();
+    let [first, second] = bundle.shielded_spends() else {
+        panic!("expected two Sapling spends")
+    };
+    assert_eq!(first.anchor(), second.anchor());
+    let mixed = sapling::Bundle::from_parts(
+        vec![
+            first.clone(),
+            sapling_testing::spend_with_anchor(second, *first.anchor() + jubjub::Base::from(1)),
+        ],
+        bundle.shielded_outputs().to_vec(),
+        *bundle.value_balance(),
+        *bundle.authorization(),
+    );
+    assert_eq!(
+        TransactionData::<Authorized>::from_parts_v7(
+            tx.consensus_branch_id(),
+            tx.lock_time(),
+            tx.expiry_height(),
+            tx.transparent_bundle().cloned(),
+            mixed.clone(),
+            tx.orchard_bundle().cloned(),
+            tx.ironwood_bundle().cloned(),
+            tx.v7_fields().unwrap().clone()
+        )
+        .err(),
+        Some(crate::transaction::v7::BundleRuleError::MixedSaplingAnchors),
+    );
+    let replaced = tx.map_bundles::<Authorized>(|t| t, |_| mixed, |o| o);
+    assert_eq!(
+        replaced.freeze().unwrap_err().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+}
+
 /// Bundles replaced after construction are checked again when the data is frozen, so no
 /// transaction breaks the bundle-local rules.
 #[test]

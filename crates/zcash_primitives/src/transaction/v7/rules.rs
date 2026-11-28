@@ -24,6 +24,8 @@ use crate::transaction::{
 pub enum BundleRuleError {
     /// The transaction version is unavailable in this consensus branch.
     UnsupportedBranch(BranchId),
+    /// Sapling spends have different anchors, but v7 encodes a single shared anchor.
+    MixedSaplingAnchors,
     /// A value pool delta has no effecting bundle of its type.
     DeltaWithoutBundle(BundleType),
     /// A coinbase transaction spends from the pool of this bundle type: it has
@@ -39,6 +41,7 @@ pub enum BundleRuleError {
 impl fmt::Display for BundleRuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MixedSaplingAnchors => f.write_str("v7 Sapling spends must share an anchor"),
             Self::UnsupportedBranch(branch) => write!(
                 f,
                 "v7 transactions are not valid in consensus branch {branch:?}"
@@ -92,6 +95,14 @@ pub(crate) fn check_bundle_local_rules<A: Authorization>(
     };
     if !tx.version.valid_in_branch(tx.consensus_branch_id) {
         return Err(BundleRuleError::UnsupportedBranch(tx.consensus_branch_id));
+    }
+    if tx.sapling_bundle().is_some_and(|bundle| {
+        bundle
+            .shielded_spends()
+            .windows(2)
+            .any(|pair| pair[0].anchor() != pair[1].anchor())
+    }) {
+        return Err(BundleRuleError::MixedSaplingAnchors);
     }
     let deltas = &fields.value_deltas;
     if deltas.transparent != ZatBalance::zero() && tx.transparent_bundle.is_none() {

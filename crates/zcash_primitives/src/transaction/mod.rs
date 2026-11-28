@@ -437,9 +437,9 @@ impl<A: Authorization> TransactionData<A> {
     /// nor outputs is dropped, since v7 encodes it by omitting it.
     ///
     /// Returns an error if v7 is unavailable in the consensus branch or if the parts
-    /// violate a ZIP 248 bundle-local rule: a transparent or
-    /// coinbase value pool delta without its bundle, a coinbase transaction that spends,
-    /// or an Orchard or Ironwood bundle whose version is not that of its pool in this
+    /// violate a ZIP 248 bundle-local rule: a transparent or coinbase value pool delta
+    /// without its bundle, a coinbase transaction that spends, Sapling spends with
+    /// different anchors, or an Orchard or Ironwood bundle with the wrong version for this
     /// consensus branch. The rules that relate the values of the bundles to each other or to the
     /// chain, such as the balance of the value pool deltas, are left to full validators.
     ///
