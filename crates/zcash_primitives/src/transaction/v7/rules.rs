@@ -9,9 +9,9 @@
 //! checksig operation uses `SIGHASH_ALL` can only be checked by running its scripts, under
 //! `zcash_script`'s `Flags::SigHashAllOnly`.
 //!
-//! Most other consensus rules are not bundle-local either: a transaction that breaks one
-//! is well-formed, and still decodes. The exception is a bundle that typed data cannot
-//! hold, the ZIP 233 bundle, which decoding rejects.
+//! Most other consensus rules are not bundle-local: a transaction that breaks one is
+//! well-formed, and still decodes. The exceptions are bundles that typed data cannot
+//! hold, an unregistered pair or the ZIP 233 bundle, which decoding rejects.
 //! [`TransactionData::check_v7_transaction_rules`] checks the rules it lists, each of
 //! which one transaction decides by itself. Full validators call it before the checks
 //! that need the block or the spent outputs.
@@ -289,9 +289,13 @@ impl core::error::Error for TransactionRuleError {}
 /// It does not verify proofs or signatures, or any rule on the contents of a shielded
 /// bundle, and it does not check the limit of 65,535 Sapling spends, Sapling outputs,
 /// and Orchard or Ironwood actions, which a transaction that fits in a block cannot
-/// exceed. Full validators also check what needs more context: that the coinbase
-/// bundle's height, subsidy and lockbox deposit and the fee delta match the block, and
-/// the transparent delta of a transaction with transparent inputs.
+/// exceed. It leaves double spends to the validator's sets of spent outputs and
+/// nullifiers, including a previous output or nullifier that the transaction itself
+/// repeats, and it does not cap the total value of the transparent outputs of a
+/// transaction with transparent inputs. Full validators also check what needs more
+/// context: that the coinbase bundle's height, subsidy and lockbox deposit and the fee
+/// delta match the block, and the transparent delta of a transaction with transparent
+/// inputs.
 ///
 /// The coinbase delta follows ZIP 248's formula, which has no term for the value that
 /// ZIP 271 pays out of the lockbox, so a v7 coinbase transaction that makes that payout

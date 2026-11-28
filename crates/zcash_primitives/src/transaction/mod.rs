@@ -521,7 +521,9 @@ impl<A: Authorization> TransactionData<A> {
     ///
     /// It does not verify proofs or signatures, or any rule on the contents of a shielded
     /// bundle, and it does not check the limit of 65,535 Sapling spends, Sapling outputs,
-    /// and Orchard or Ironwood actions. Decoding does not check these rules, because a
+    /// and Orchard or Ironwood actions, a previous output or nullifier that the
+    /// transaction repeats, or the total value of the transparent outputs of a
+    /// transaction with transparent inputs. Decoding does not check these rules, because a
     /// transaction that breaks one is well-formed. Full validators call this, and then
     /// check the rules that need the block or the spent outputs. Transactions of earlier
     /// versions always pass.

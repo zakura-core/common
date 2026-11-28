@@ -1742,14 +1742,18 @@ fn transaction_local_rules_reject_each_violation() {
 fn transaction_local_rules_reject_a_null_previous_output() {
     use crate::transaction::v7::TransactionRuleError as E;
 
-    let mut tx = vector_data(STANDARD);
-    let input = &mut tx.transparent_bundle.as_mut().unwrap().vin[0];
-    *input = TxIn::from_parts(
-        transparent::OutPoint::NULL,
-        input.script_sig().clone(),
-        input.sequence(),
-    );
-    assert_eq!(tx.check_v7_transaction_rules(), Err(E::NullPrevout));
+    let inputs = vector_data(SHIELDING).transparent_bundle.unwrap().vin.len();
+    assert!(inputs > 1, "the vector has several transparent inputs");
+    for index in 0..inputs {
+        let mut tx = vector_data(SHIELDING);
+        let input = &mut tx.transparent_bundle.as_mut().unwrap().vin[index];
+        *input = TxIn::from_parts(
+            transparent::OutPoint::NULL,
+            input.script_sig().clone(),
+            input.sequence(),
+        );
+        assert_eq!(tx.check_v7_transaction_rules(), Err(E::NullPrevout));
+    }
 }
 
 /// The flags byte is the last byte of an Orchard or Ironwood bundle's effecting data.
