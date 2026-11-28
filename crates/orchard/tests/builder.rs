@@ -698,6 +698,17 @@ fn per_signature_digests_sign_and_verify() {
             output_only_builder(BundleVersion::ironwood_v3(), BundleType::DEFAULT, recipient);
         let (unauthorized, _) = builder.build(&mut rng).unwrap().unwrap();
         let proven = unauthorized.create_proof(pk, &mut rng).unwrap();
+        assert_eq!(proven.actions().len(), 2);
+        assert!(matches!(
+            proven.clone().prepare(&mut rng, OneActionDigests),
+            Err(orchard::builder::BuildError::MissingSignatureDigest { index: 1 })
+        ));
+        assert!(matches!(
+            proven
+                .clone()
+                .apply_signatures(&mut rng, OneActionDigests, &[]),
+            Err(orchard::builder::BuildError::MissingSignatureDigest { index: 1 })
+        ));
         proven
             .apply_signatures(&mut rng, PerSignatureDigests, &[])
             .unwrap()
@@ -752,6 +763,7 @@ fn per_signature_digests_sign_and_verify() {
     let appended: Bundle<_, i64> = proven
         .clone()
         .prepare(&mut rng, PerSignatureDigests)
+        .unwrap()
         .append_signatures(core::slice::from_ref(&external))
         .unwrap()
         .finalize()
@@ -761,6 +773,7 @@ fn per_signature_digests_sign_and_verify() {
     assert!(matches!(
         proven
             .prepare(&mut rng, SwappedDigests)
+            .unwrap()
             .append_signatures(&[external]),
         Err(orchard::builder::BuildError::InvalidExternalSignature)
     ));

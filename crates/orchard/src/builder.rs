@@ -185,6 +185,11 @@ pub enum BuildError {
     OutputsDisabled,
     /// The anchor provided to this builder doesn't match the Merkle path used to add a spend.
     AnchorMismatch,
+    /// The digest provider did not cover the action at this position.
+    MissingSignatureDigest {
+        /// Zero-based position in the final bundle order.
+        index: usize,
+    },
     /// A bundle could not be built because required signatures were missing.
     MissingSignatures,
     /// An error occurred in the process of producing a proof for a bundle.
@@ -229,6 +234,9 @@ impl fmt::Display for BuildError {
                 f,
                 "Orchard bundle construction is not supported for {version:?}"
             ),
+            BuildError::MissingSignatureDigest { index } => {
+                write!(f, "Missing signature digest for action {index}")
+            }
             MissingSignatures => f.write_str("Required signatures were missing during build"),
             #[cfg(feature = "prover")]
             Proof(crate::circuit::ProofError::InvalidInput) => {
@@ -1736,10 +1744,7 @@ impl MaybeSigned {
 impl<P: fmt::Debug, V> Bundle<InProgress<P, Unauthorized>, V> {
     /// Loads the signature digests into this bundle, preparing it for signing.
     ///
-    /// # Panics
-    ///
-    /// Panics if `sighashes` has no digest for one of the bundle's spend authorization
-    /// signatures, as when it describes another bundle.
+    /// Returns [`BuildError::MissingSignatureDigest`] for the first action without a digest.
     ///
     /// `sighashes` supplies the digest each signature signs: a `[u8; 32]` for a bundle
     /// of a v5 or v6 transaction, whose signatures share one digest.
@@ -1747,18 +1752,18 @@ impl<P: fmt::Debug, V> Bundle<InProgress<P, Unauthorized>, V> {
         self,
         mut rng: R,
         sighashes: impl SignatureDigests,
-    ) -> Bundle<InProgress<P, PartiallyAuthorized>, V> {
+    ) -> Result<Bundle<InProgress<P, PartiallyAuthorized>, V>, BuildError> {
         let spend_auth_sighashes: Vec<_> = (0..self.actions().len())
             .map(|index| {
                 sighashes
                     .spend_auth(index)
-                    .expect("the caller supplies the signature digests of the bundle it signs")
+                    .ok_or(BuildError::MissingSignatureDigest { index })
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         // `map_authorization` visits the actions in order, so the counter is each
         // action's index.
         let mut context = (&mut rng, 0usize);
-        self.map_authorization(
+        Ok(self.map_authorization(
             &mut context,
             |(rng, index), _, SigningMetadata { dummy_ask, parts }| {
                 let sighash = spend_auth_sighashes[*index];
@@ -1779,7 +1784,7 @@ impl<P: fmt::Debug, V> Bundle<InProgress<P, Unauthorized>, V> {
                     spend_auth_sighashes: spend_auth_sighashes.clone(),
                 },
             },
-        )
+        ))
     }
 }
 
@@ -1789,10 +1794,7 @@ impl<V> Bundle<InProgress<Proof, Unauthorized>, V> {
     /// This is a helper method that wraps [`Bundle::prepare`], [`Bundle::sign`], and
     /// [`Bundle::finalize`].
     ///
-    /// # Panics
-    ///
-    /// Panics if `sighashes` has no digest for one of the bundle's spend authorization
-    /// signatures, as [`Bundle::prepare`] does.
+    /// Returns [`BuildError::MissingSignatureDigest`] for the first action without a digest.
     pub fn apply_signatures<R: Rng + CryptoRng>(
         self,
         mut rng: R,
@@ -1801,7 +1803,7 @@ impl<V> Bundle<InProgress<Proof, Unauthorized>, V> {
     ) -> Result<Bundle<Authorized, V>, BuildError> {
         signing_keys
             .iter()
-            .fold(self.prepare(&mut rng, sighashes), |partial, ask| {
+            .fold(self.prepare(&mut rng, sighashes)?, |partial, ask| {
                 partial.sign(&mut rng, ask)
             })
             .finalize()
@@ -2092,6 +2094,7 @@ pub mod testing {
                 .create_proof(current_proving_key(), &mut self.rng)
                 .unwrap()
                 .prepare(&mut self.rng, [0; 32])
+                .unwrap()
                 .sign(&mut self.rng, &SpendAuthorizingKey::from(&self.sk))
                 .finalize()
                 .unwrap()
@@ -2799,6 +2802,7 @@ mod tests {
             .create_proof(pk, &mut rng)
             .unwrap()
             .prepare(rng, [0; 32])
+            .unwrap()
             .finalize()
             .unwrap();
         assert_eq!(bundle.value_balance(), &(-5000))
@@ -3432,7 +3436,7 @@ mod tests {
         }
 
         // Both the real spend and the fabricated change spend require real signatures.
-        let bundle = bundle.prepare(rng, [0; 32]);
+        let bundle = bundle.prepare(rng, [0; 32]).unwrap();
         assert_eq!(num_unsigned(&bundle), 2);
 
         let bundle = bundle.sign(rng, &SpendAuthorizingKey::from(&spend_sk));
@@ -3465,7 +3469,8 @@ mod tests {
             .unwrap()
             .unwrap()
             .0
-            .prepare(rng, [0; 32]);
+            .prepare(rng, [0; 32])
+            .unwrap();
         assert_eq!(bundle.actions().len(), 2);
         assert_eq!(num_unsigned(&bundle), 1);
 

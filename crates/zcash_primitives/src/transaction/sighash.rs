@@ -1,17 +1,9 @@
 use blake2b_simd::Hash as Blake2bHash;
 use core::fmt;
 
-use alloc::vec::Vec;
-
 use super::{
-    Authorization, TransactionData, TxDigests, TxVersion,
-    sighash_v4::v4_signature_hash,
-    sighash_v5::v5_signature_hash,
-    sighash_v7::{
-        SighashPrefix, SpentOutputs, shielded_context, shielded_signature_count, v7_signature_hash,
-    },
-    txid::bytes32,
-    v7,
+    Authorization, TransactionData, TxDigests, TxVersion, sighash_v4::v4_signature_hash,
+    sighash_v5::v5_signature_hash, sighash_v7::v7_signature_hash, v7,
 };
 use ::sapling::bundle::GrothProofBytes;
 
@@ -94,7 +86,7 @@ impl core::error::Error for SighashError {}
 
 pub struct SignatureHash(pub(super) Blake2bHash);
 
-pub use super::sighash_v7::V7SignatureHashes;
+pub use super::sighash_v7::{V7ShieldedSighashes, V7SignatureHashes};
 
 impl AsRef<[u8; 32]> for SignatureHash {
     fn as_ref(&self) -> &[u8; 32] {
@@ -135,77 +127,4 @@ pub fn signature_hash<
 
         TxVersion::V7 => return v7_signature_hash(tx, signable_input, txid_parts),
     }))
-}
-
-/// The digests that the signatures of one Sapling, Orchard, or Ironwood bundle of a v7
-/// transaction sign: one per spend authorization signature, and one for the binding
-/// signature.
-///
-/// Pass it to the bundle's builder or batch validator, which accept any
-/// `SignatureDigests`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct V7ShieldedSighashes {
-    spend_auth: Vec<[u8; 32]>,
-    binding: [u8; 32],
-}
-
-impl V7ShieldedSighashes {
-    /// Computes the signature digests of the `bundle_type` bundle of the v7 transaction
-    /// `tx`.
-    ///
-    /// Returns an error if `tx` is not a v7 transaction, if it has no such bundle, if the
-    /// bundle has more spends than a two-byte signature context can address, if
-    /// `txid_parts` lacks the v7 digests, or if the transparent authorizing context does
-    /// not describe one spent output per input. The caller must pass the `txid_parts` of
-    /// `tx` itself; digests of another transaction are not detected.
-    pub fn new<
-        TA: ::transparent::sighash::TransparentAuthorizingContext,
-        A: Authorization<TransparentAuth = TA>,
-    >(
-        tx: &TransactionData<A>,
-        bundle_type: v7::ShieldedBundleType,
-        txid_parts: &TxDigests<Blake2bHash>,
-    ) -> Result<Self, SighashError> {
-        if tx.version != TxVersion::V7 {
-            return Err(SighashError::SignerVersionMismatch);
-        }
-        let count = shielded_signature_count(tx, bundle_type)?;
-        let bundle = v7::BundleId::new(bundle_type.into(), v7::BundleVariant::V0);
-        let prefix =
-            SighashPrefix::new(tx.consensus_branch_id, txid_parts, &SpentOutputs::of(tx)?)?;
-        let digest = |signature| {
-            shielded_context(signature, count)
-                .map(|context| bytes32(&prefix.digest(bundle, &context)))
-        };
-        Ok(Self {
-            spend_auth: (0..count)
-                .map(|index| digest(v7::ShieldedSignature::SpendAuth { index }))
-                .collect::<Result<_, _>>()?,
-            binding: digest(v7::ShieldedSignature::Binding)?,
-        })
-    }
-
-    fn spend_auth_digest(&self, index: usize) -> Option<[u8; 32]> {
-        self.spend_auth.get(index).copied()
-    }
-}
-
-impl sapling::bundle::SignatureDigests for V7ShieldedSighashes {
-    fn spend_auth(&self, index: usize) -> Option<[u8; 32]> {
-        self.spend_auth_digest(index)
-    }
-
-    fn binding(&self) -> [u8; 32] {
-        self.binding
-    }
-}
-
-impl orchard::bundle::SignatureDigests for V7ShieldedSighashes {
-    fn spend_auth(&self, index: usize) -> Option<[u8; 32]> {
-        self.spend_auth_digest(index)
-    }
-
-    fn binding(&self) -> [u8; 32] {
-        self.binding
-    }
 }

@@ -132,6 +132,11 @@ pub enum Error {
     InvalidAmount,
     /// External signature is not valid.
     InvalidExternalSignature,
+    /// The digest provider did not cover the spend at this position.
+    MissingSignatureDigest {
+        /// Zero-based position in the final bundle order.
+        index: usize,
+    },
     /// A bundle could not be built because required signatures were missing.
     MissingSignatures,
     /// A required spending key was not provided.
@@ -156,6 +161,9 @@ impl fmt::Display for Error {
             Error::InvalidAddress => write!(f, "Invalid address"),
             Error::InvalidAmount => write!(f, "Invalid amount"),
             Error::InvalidExternalSignature => write!(f, "External signature was invalid"),
+            Error::MissingSignatureDigest { index } => {
+                write!(f, "Missing signature digest for spend {index}")
+            }
             Error::MissingSignatures => write!(f, "Required signatures were missing during build"),
             Error::MissingSpendingKey => write!(f, "A required spending key was not provided"),
             Error::PcztRequiresZip212 => {
@@ -1215,10 +1223,7 @@ impl MaybeSigned {
 impl<P: InProgressProofs, V> Bundle<InProgress<P, Unsigned>, V> {
     /// Loads the signature digests into this bundle, preparing it for signing.
     ///
-    /// # Panics
-    ///
-    /// Panics if `sighashes` has no digest for one of the bundle's spend authorization
-    /// signatures, as when it describes another bundle.
+    /// Returns [`Error::MissingSignatureDigest`] for the first spend without a digest.
     ///
     /// `sighashes` supplies the digest each signature signs: a `[u8; 32]` for a bundle of
     /// a transaction before v7, whose signatures share one digest.
@@ -1226,17 +1231,17 @@ impl<P: InProgressProofs, V> Bundle<InProgress<P, Unsigned>, V> {
         self,
         mut rng: R,
         sighashes: impl SignatureDigests,
-    ) -> Bundle<InProgress<P, PartiallyAuthorized>, V> {
+    ) -> Result<Bundle<InProgress<P, PartiallyAuthorized>, V>, Error> {
         let spend_auth_sighashes: Vec<_> = (0..self.shielded_spends().len())
             .map(|index| {
                 sighashes
                     .spend_auth(index)
-                    .expect("the caller supplies the signature digests of the bundle it signs")
+                    .ok_or(Error::MissingSignatureDigest { index })
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
         // `map_authorization` visits the spends in order, so the counter is each spend's
         // index.
-        self.map_authorization(
+        Ok(self.map_authorization(
             (&mut rng, 0usize),
             |_, proof| proof,
             |_, proof| proof,
@@ -1257,7 +1262,7 @@ impl<P: InProgressProofs, V> Bundle<InProgress<P, Unsigned>, V> {
                 },
                 _proof_state: PhantomData,
             },
-        )
+        ))
     }
 }
 
@@ -1267,10 +1272,7 @@ impl<V> Bundle<InProgress<Proven, Unsigned>, V> {
     /// This is a helper method that wraps [`Bundle::prepare`], [`Bundle::sign`], and
     /// [`Bundle::finalize`].
     ///
-    /// # Panics
-    ///
-    /// Panics if `sighashes` has no digest for one of the bundle's spend authorization
-    /// signatures, as [`Bundle::prepare`] does.
+    /// Returns [`Error::MissingSignatureDigest`] for the first spend without a digest.
     pub fn apply_signatures<R: Rng + CryptoRng>(
         self,
         mut rng: R,
@@ -1279,7 +1281,7 @@ impl<V> Bundle<InProgress<Proven, Unsigned>, V> {
     ) -> Result<Bundle<Authorized, V>, Error> {
         signing_keys
             .iter()
-            .fold(self.prepare(&mut rng, sighashes), |partial, ask| {
+            .fold(self.prepare(&mut rng, sighashes)?, |partial, ask| {
                 partial.sign(&mut rng, ask)
             })
             .finalize()
@@ -1455,6 +1457,125 @@ mod tests {
             bvk.verify(
                 &PerSignatureDigests.binding(),
                 &bundle.authorization().binding_sig
+            )
+            .is_ok()
+        );
+    }
+
+    #[cfg(feature = "wallet")]
+    #[test]
+    fn local_and_external_signatures_follow_final_spend_order() {
+        use super::{Error, ExtendedSpendingKey};
+        use crate::{
+            CommitmentTree, IncrementalWitness, Node, Rseed,
+            bundle::SignatureDigests,
+            value::{CommitmentSum, NoteValue},
+        };
+        let mut rng = StdRng::seed_from_u64(1);
+        let keys = [
+            ExtendedSpendingKey::master(&[1; 32]),
+            ExtendedSpendingKey::master(&[2; 32]),
+        ];
+        let notes = keys.each_ref().map(|key| {
+            key.default_address()
+                .1
+                .create_note(NoteValue::from_raw(1), Rseed::AfterZip212([3; 32]))
+        });
+        let [first, second] = notes.each_ref().map(|note| Node::from_cmu(&note.cmu()));
+        let mut tree = CommitmentTree::empty();
+        tree.append(first).unwrap();
+        let mut first_witness = IncrementalWitness::from_tree(tree.clone()).unwrap();
+        first_witness.append(second).unwrap();
+        tree.append(second).unwrap();
+        let mut builder = Builder::new(
+            Zip212Enforcement::On,
+            BundleType::Transactional {
+                bundle_required: true,
+            },
+            tree.root().into(),
+        );
+        let witnesses = [first_witness, IncrementalWitness::from_tree(tree).unwrap()];
+        for ((key, note), witness) in keys.iter().zip(notes).zip(witnesses) {
+            builder
+                .add_spend(
+                    key.to_diversifiable_full_viewing_key().fvk().clone(),
+                    note,
+                    witness.path().unwrap(),
+                )
+                .unwrap();
+        }
+        let (bundle, order) = builder
+            .build::<MockSpendProver, MockOutputProver, _, i64>(&keys, &mut rng)
+            .unwrap()
+            .unwrap();
+        let proven = bundle.create_proofs(&MockSpendProver, &MockOutputProver, &mut rng, ());
+        assert_eq!(proven.shielded_spends().len(), 2);
+        struct FirstSpendOnly;
+        impl SignatureDigests for FirstSpendOnly {
+            fn spend_auth(&self, index: usize) -> Option<[u8; 32]> {
+                (index == 0).then_some([1; 32])
+            }
+            fn binding(&self) -> [u8; 32] {
+                PerSignatureDigests.binding()
+            }
+        }
+        assert!(matches!(
+            proven.clone().prepare(&mut rng, FirstSpendOnly),
+            Err(Error::MissingSignatureDigest { index: 1 })
+        ));
+        assert!(matches!(
+            proven
+                .clone()
+                .apply_signatures(&mut rng, FirstSpendOnly, &[]),
+            Err(Error::MissingSignatureDigest { index: 1 })
+        ));
+
+        let local = order.spend_index(0).unwrap();
+        let external = order.spend_index(1).unwrap();
+        let randomized_key = keys[1].expsk.ask.randomize(
+            &proven.shielded_spends()[external]
+                .spend_auth_sig()
+                .parts
+                .alpha,
+        );
+        let digest = |index| PerSignatureDigests.spend_auth(index).unwrap();
+        let partial = proven
+            .prepare(&mut rng, PerSignatureDigests)
+            .unwrap()
+            .sign(&mut rng, &keys[0].expsk.ask);
+        let misplaced = randomized_key.sign(&mut rng, &digest(local));
+        assert!(matches!(
+            partial.clone().append_signatures(&[misplaced]),
+            Err(Error::InvalidExternalSignature)
+        ));
+        let signature = randomized_key.sign(&mut rng, &digest(external));
+        let signed = partial
+            .append_signatures(&[signature])
+            .unwrap()
+            .finalize()
+            .unwrap();
+        for (index, spend) in signed.shielded_spends().iter().enumerate() {
+            assert!(
+                spend
+                    .rk()
+                    .verify(&digest(index), spend.spend_auth_sig())
+                    .is_ok()
+            );
+            assert!(
+                spend
+                    .rk()
+                    .verify(&digest(1 - index), spend.spend_auth_sig())
+                    .is_err()
+            );
+        }
+        let bvk = (CommitmentSum::try_sum(signed.shielded_spends().iter().map(|s| s.cv()))
+            .unwrap()
+            - CommitmentSum::try_sum(signed.shielded_outputs().iter().map(|o| o.cv())).unwrap())
+        .into_bvk(*signed.value_balance());
+        assert!(
+            bvk.verify(
+                &PerSignatureDigests.binding(),
+                &signed.authorization().binding_sig
             )
             .is_ok()
         );
