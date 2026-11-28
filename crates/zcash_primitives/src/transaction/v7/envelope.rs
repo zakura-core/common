@@ -6,7 +6,7 @@
 //! [`Envelope::new`] checks the map rules and the branch ID, and the type of
 //! [`ValuePoolDelta::value`] holds the nonzero-delta rule.
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::vec::Vec;
 use core::{fmt, num::NonZeroI64};
 use corez::io::{self, Read, Write};
 
@@ -326,32 +326,14 @@ fn check_parsing_rules(
     effect_bundles: &[BundleData],
     auth_bundles: &[BundleData],
 ) -> Result<(), EnvelopeError> {
-    let maps = [
-        (
-            MapKind::ValuePoolDeltas,
-            value_pool_deltas
-                .iter()
-                .map(|d| d.bundle)
-                .collect::<Vec<_>>(),
-        ),
-        (
-            MapKind::EffectBundles,
-            effect_bundles.iter().map(|b| b.bundle).collect(),
-        ),
-        (
-            MapKind::AuthBundles,
-            auth_bundles.iter().map(|b| b.bundle).collect(),
-        ),
-    ];
+    let deltas = value_pool_deltas.iter().map(|d| d.bundle);
+    let effects = effect_bundles.iter().map(|b| b.bundle);
+    let auths = auth_bundles.iter().map(|b| b.bundle);
 
-    // Every identifier can be read back as a `compactSize`.
-    let max = BundleType::new(MAX_COMPACT_SIZE);
-    if let Some(id) = maps
-        .iter()
-        .flat_map(|(_, ids)| ids)
-        .find(|id| id.bundle_type > max || id.variant > BundleVariant::new(MAX_COMPACT_SIZE))
-    {
-        return Err(EnvelopeError::IdOutOfRange(*id));
+    for id in deltas.clone().chain(effects.clone()).chain(auths.clone()) {
+        if id.bundle_type.id() > MAX_COMPACT_SIZE || id.variant.id() > MAX_COMPACT_SIZE {
+            return Err(EnvelopeError::IdOutOfRange(id));
+        }
     }
 
     if let Some(bundle) = effect_bundles
@@ -362,38 +344,53 @@ fn check_parsing_rules(
         return Err(EnvelopeError::PayloadTooLong(bundle.bundle));
     }
 
-    // Each map has at most one entry per bundle type, in strictly increasing order.
-    for (map, ids) in &maps {
-        for pair in ids.windows(2) {
-            if pair[1].bundle_type <= pair[0].bundle_type {
-                return Err(EnvelopeError::UnorderedMap {
-                    map: *map,
-                    bundle_type: pair[1].bundle_type,
-                });
-            }
+    check_map_order(MapKind::ValuePoolDeltas, deltas.clone())?;
+    check_map_order(MapKind::EffectBundles, effects.clone())?;
+    check_map_order(MapKind::AuthBundles, auths.clone())?;
+
+    // Consume all entries for the smallest remaining type together. Each cursor
+    // moves only forward, including when a type is missing from one or two maps.
+    let mut deltas = deltas.peekable();
+    let mut effects = effects.peekable();
+    let mut auths = auths.peekable();
+    let mut missing_effect = None;
+    while let Some(id) = [deltas.peek(), effects.peek(), auths.peek()]
+        .into_iter()
+        .flatten()
+        .min_by_key(|id| id.bundle_type)
+        .copied()
+    {
+        let same_type = |other: &BundleId| other.bundle_type == id.bundle_type;
+        let delta = deltas.next_if(same_type);
+        let effect = effects.next_if(same_type);
+        let auth = auths.next_if(same_type);
+        if [delta, effect, auth]
+            .into_iter()
+            .flatten()
+            .any(|other| other.variant != id.variant)
+        {
+            return Err(EnvelopeError::InconsistentVariant(id.bundle_type));
+        }
+        // As before, report inconsistent variants before an unpaired authorization.
+        if auth.is_some() && effect.is_none() {
+            missing_effect.get_or_insert(id.bundle_type);
         }
     }
-
-    // All entries for one bundle type use the same variant.
-    let mut variants = BTreeMap::<BundleType, BundleVariant>::new();
-    for id in maps.iter().flat_map(|(_, ids)| ids) {
-        match variants.insert(id.bundle_type, id.variant) {
-            Some(variant) if variant != id.variant => {
-                return Err(EnvelopeError::InconsistentVariant(id.bundle_type));
-            }
-            _ => {}
-        }
+    if let Some(bundle_type) = missing_effect {
+        return Err(EnvelopeError::AuthWithoutEffect(bundle_type));
     }
+    Ok(())
+}
 
-    // Authorizing data cannot exist without effecting data of the same bundle. With the
-    // variant check above, a matching type implies a matching variant. The maps are
-    // sorted by now, so each lookup is a binary search.
-    for auth in auth_bundles {
-        if find_bundle(effect_bundles, auth.bundle.bundle_type).is_none() {
-            return Err(EnvelopeError::AuthWithoutEffect(auth.bundle.bundle_type));
+fn check_map_order(map: MapKind, ids: impl Iterator<Item = BundleId>) -> Result<(), EnvelopeError> {
+    let mut previous = None;
+    for id in ids {
+        let bundle_type = id.bundle_type;
+        if previous.is_some_and(|prev| bundle_type <= prev) {
+            return Err(EnvelopeError::UnorderedMap { map, bundle_type });
         }
+        previous = Some(bundle_type);
     }
-
     Ok(())
 }
 
