@@ -1692,7 +1692,6 @@ fn transaction_local_rules_reject_each_violation() {
             .unwrap()
             .value = core::num::NonZeroI64::new(-1).unwrap();
     })
-    .ok()
     .expect("a negative Orchard balance is well-formed");
     assert_eq!(
         deposit.check_v7_transaction_rules(),
@@ -1712,8 +1711,7 @@ fn typed_decoding_rejects_a_zip_233_delta() {
             })
         };
         let error = decode_edited(STANDARD, |deltas, _, _| add_delta(deltas))
-            .err()
-            .expect("the ZIP 233 bundle is not active");
+            .expect_err("the ZIP 233 bundle is not active");
         assert!(alloc::format!("{error}").contains("not active"), "{error}");
 
         let bytes = hex::decode(super::vectors::TEST_VECTORS[STANDARD].tx.as_bytes()).unwrap();
