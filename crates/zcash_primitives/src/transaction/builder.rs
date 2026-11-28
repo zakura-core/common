@@ -63,20 +63,25 @@ pub const PRE_NU7_DEFAULT_TX_EXPIRY_DELTA: u32 = 40;
 pub const NU7_DEFAULT_TX_EXPIRY_DELTA: u32 =
     consensus::NU7_POW_TARGET_SPACING_RATIO * PRE_NU7_DEFAULT_TX_EXPIRY_DELTA;
 
+/// ZIP 223's default expiry delta at 20 seconds per block (about 50 minutes).
+pub const NU7_1_DEFAULT_TX_EXPIRY_DELTA: u32 = 150;
+
 /// Returns the ordinary transaction expiry delta at the candidate inclusion height.
 /// Explicit expiry overrides and coinbase expiry are independent of this default.
 pub fn default_tx_expiry_delta<P: consensus::Parameters>(
     params: &P,
     target_height: BlockHeight,
 ) -> u32 {
-    if consensus::nu7_activation_height(params).is_some_and(|h| h <= target_height) {
+    if params.is_nu_active(consensus::NetworkUpgrade::Nu7_1, target_height) {
+        NU7_1_DEFAULT_TX_EXPIRY_DELTA
+    } else if consensus::nu7_activation_height(params).is_some_and(|h| h <= target_height) {
         NU7_DEFAULT_TX_EXPIRY_DELTA
     } else {
         PRE_NU7_DEFAULT_TX_EXPIRY_DELTA
     }
 }
 
-/// Checks the NU7 per-transaction shielded budget using final, padded bundle counts.
+/// Checks final, padded bundle counts against the shielded block limits at the target height.
 /// Each Sapling spend/output and each Orchard/Ironwood action costs one unit.
 /// This construction policy prevents transactions that cannot fit in any NU7 block.
 pub fn check_shielded_budget<P: consensus::Parameters>(
@@ -87,24 +92,36 @@ pub fn check_shielded_budget<P: consensus::Parameters>(
     orchard_actions: usize,
     ironwood_actions: usize,
 ) -> Result<(), &'static str> {
-    if consensus::nu7_activation_height(params).is_none_or(|h| target_height < h) {
-        return Ok(());
-    }
+    let (sapling_limit, orchard_limit, combined_limit) =
+        if params.is_nu_active(consensus::NetworkUpgrade::Nu7_1, target_height) {
+            // ZIP 223 scales each ZIP 218 limit by 4/5 at 20-second spacing.
+            (
+                consensus::NU7_1_SAPLING_BLOCK_IO_LIMIT,
+                consensus::NU7_1_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT,
+                consensus::NU7_1_GLOBAL_SHIELDED_BUDGET,
+            )
+        } else if consensus::nu7_activation_height(params).is_some_and(|h| h <= target_height) {
+            (
+                consensus::NU7_SAPLING_BLOCK_IO_LIMIT,
+                consensus::NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT,
+                consensus::NU7_GLOBAL_SHIELDED_BUDGET,
+            )
+        } else {
+            return Ok(());
+        };
     let sapling = sapling_spends
         .checked_add(sapling_outputs)
         .ok_or("Sapling count overflow")?;
-    if sapling > consensus::NU7_SAPLING_BLOCK_IO_LIMIT {
+    if sapling > sapling_limit {
         return Err("NU7 Sapling spends plus outputs exceed the per-pool limit");
     }
-    if orchard_actions > consensus::NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT
-        || ironwood_actions > consensus::NU7_ORCHARD_PROTOCOL_BLOCK_ACTION_LIMIT
-    {
+    if orchard_actions > orchard_limit || ironwood_actions > orchard_limit {
         return Err("NU7 Orchard or Ironwood actions exceed the per-pool limit");
     }
     if sapling
         .checked_add(orchard_actions)
         .and_then(|n| n.checked_add(ironwood_actions))
-        .is_none_or(|n| n > consensus::NU7_GLOBAL_SHIELDED_BUDGET)
+        .is_none_or(|n| n > combined_limit)
     {
         return Err("NU7 combined shielded budget exceeds the block limit");
     }
@@ -1004,7 +1021,7 @@ impl<P: consensus::Parameters> Builder<P, ()> {
     /// # Default values
     ///
     /// The expiry height will be set to the given height plus the default transaction
-    /// expiry delta (40 blocks before NU7; 120 blocks from NU7).
+    /// expiry delta (40 blocks before NU7, 120 at NU7, and 150 at NU7.1).
     pub fn new(params: P, target_height: BlockHeight, build_config: BuildConfig) -> Self {
         let consensus_branch_id = BranchId::for_height(&params, target_height);
         // Historical bundle versions remain available to readers; construction
@@ -2057,31 +2074,63 @@ mod tests {
 
     #[test]
     #[cfg(feature = "circuits")]
-    fn nu7_policy_starts_at_the_first_nu7_or_later_upgrade() {
+    fn wallet_policy_follows_the_active_spacing_even_when_local_upgrades_coincide() {
         use zcash_protocol::zip318::BlockSpacing;
-
-        let activation = 12u32.into();
-        for (nu7, nu7_1) in [
-            (None, Some(activation)),
-            (Some(activation), Some(activation)),
-            (Some(activation), Some(activation + 1)),
-            (Some(activation + 1), Some(activation)),
+        for (nu7, nu7_1, middle_expiry, middle_seconds) in [
+            (None, 12, 150, 20),
+            (Some(12), 12, 150, 20),
+            (Some(13), 12, 150, 20),
+            (Some(12), 13, 120, 25),
         ] {
             let mut network = nu7_test_network();
-            network.nu7 = nu7;
-            network.nu7_1 = nu7_1;
+            network.nu7 = nu7.map(Into::into);
+            network.nu7_1 = Some(nu7_1.into());
             let spacing = BlockSpacing::for_network(&network);
-            for (height, expiry, ratio, within_budget) in [
-                (activation - 1, 40, 1, true),
-                (activation, 120, 3, false),
-                (activation + 1, 120, 3, false),
+            for (height, expiry, seconds) in [
+                (11, 40, 75),
+                (12, middle_expiry, middle_seconds),
+                (13, 150, 20),
             ] {
+                let height = height.into();
                 assert_eq!(super::default_tx_expiry_delta(&network, height), expiry);
-                assert_eq!(spacing.blocks_per_reference_block(height), ratio);
+                assert_eq!(spacing.target_spacing_seconds(height), seconds);
                 assert_eq!(
                     super::check_shielded_budget(&network, height, 0, 0, 331, 0).is_ok(),
-                    within_budget
+                    seconds == 75
                 );
+                assert_eq!(
+                    super::check_shielded_budget(&network, height, 0, 0, 300, 0).is_ok(),
+                    seconds != 20
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn twenty_second_shielded_limits_apply_at_candidate_height() {
+        let mut network = nu7_test_network();
+        network.nu7_1 = Some(20u32.into());
+        for (spends, outputs, orchard, ironwood, allowed) in [
+            (239, 1, 24, 0, true),
+            (240, 1, 0, 0, false),
+            (0, 0, 264, 0, true),
+            (0, 0, 265, 0, false),
+            (0, 0, 0, 264, true),
+            (0, 0, 0, 265, false),
+            (0, 0, 132, 132, true),
+            (0, 0, 132, 133, false),
+        ] {
+            for height in [19u32, 20, 21] {
+                let result = super::check_shielded_budget(
+                    &network,
+                    height.into(),
+                    spends,
+                    outputs,
+                    orchard,
+                    ironwood,
+                );
+                assert_eq!(result.is_ok(), height < 20 || allowed);
             }
         }
     }
@@ -2248,15 +2297,17 @@ mod tests {
 
     #[test]
     #[cfg(feature = "circuits")]
-    fn nu7_default_expiry_uses_target_height() {
-        // Pin the ZIP 218 value independently of the ratio used by the constant.
-        assert_eq!(super::NU7_DEFAULT_TX_EXPIRY_DELTA, 120);
-        let params = nu7_test_network();
+    fn ordinary_and_deferred_expiry_use_the_target_height() {
+        let mut params = nu7_test_network();
         let activation = params.activation_height(NetworkUpgrade::Nu7).unwrap();
+        let twenty_seconds = activation + 10;
+        params.nu7_1 = Some(twenty_seconds);
         for (target, delta) in [
             (activation - 1, 40),
             (activation, 120),
-            (activation + 1, 120),
+            (twenty_seconds - 1, 120),
+            (twenty_seconds, 150),
+            (twenty_seconds + 1, 150),
         ] {
             let builder = Builder::new(
                 params,

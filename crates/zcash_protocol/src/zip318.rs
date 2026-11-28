@@ -16,7 +16,8 @@
 use core::num::NonZeroU32;
 
 use crate::consensus::{
-    BlockHeight, NU7_POW_TARGET_SPACING_RATIO, Parameters, nu7_activation_height,
+    BlockHeight, NU7_1_TARGET_SPACING, NU7_POW_TARGET_SPACING_RATIO, NetworkUpgrade, Parameters,
+    SECONDS_PER_BLOCK, nu7_activation_height,
 };
 use crate::value::{COIN, Zatoshis};
 
@@ -184,9 +185,8 @@ pub fn is_canonical_denomination(value: Zatoshis) -> bool {
 /// EXPIRY MUST): the most recent multiple of the expiry modulus at or below `target_height`, plus
 /// twice the modulus.
 ///
-/// The modulus is [`EXPIRY_MODULUS`] reference blocks, converted to blocks by `spacing` at
-/// `target_height`: 34,560 blocks before NU7 activation and 103,680 blocks from activation, both
-/// about 30 days.
+/// At 75-, 25-, and 20-second spacing, [`EXPIRY_MODULUS`] reference blocks correspond to
+/// 34,560, 103,680, and 129,600 blocks respectively, about 30 days in each era.
 ///
 /// This is a pure function of the height, so it reveals nothing per-wallet: every transaction in the
 /// same modulus period shares one expiry, whereas an ordinary per-transaction expiry would single a
@@ -206,67 +206,85 @@ fn rolling_expiry(
     window: u32,
     reference: BlockHeight,
 ) -> BlockHeight {
-    let ratio = u64::from(spacing.blocks_per_reference_block(reference));
+    let seconds = spacing.target_spacing_seconds(reference);
     let h = u64::from(u32::from(reference));
-    let modulus = u64::from(modulus) * ratio;
-    let expiry = h - (h % modulus) + u64::from(window) * ratio;
+    let modulus = scaled_block_count(modulus, seconds);
+    let expiry = h - (h % modulus) + scaled_block_count(window, seconds);
     BlockHeight::from_u32(u32::try_from(expiry).unwrap_or(u32::MAX))
 }
 
-/// The block spacing of a chain, for converting [ZIP 318] durations into block heights.
-///
-/// ZIP 318 states each duration as a number of REFERENCE BLOCKS: blocks at the 75-second target
-/// spacing. From NU7 activation the target spacing is 25 seconds, so the same duration spans
-/// [`NU7_POW_TARGET_SPACING_RATIO`] times as many blocks. A duration that starts before activation
-/// and ends after it keeps its exact length: its part before activation counts one block per
-/// reference block, and its part after activation counts the ratio.
-///
-/// [ZIP 318]: https://zips.z.cash/zip-0318
+/// Convert a whole duration before rounding. A custom interval that ends between
+/// blocks uses the first block at or after its end.
+fn scaled_block_count(reference_blocks: u32, seconds: u32) -> u64 {
+    (u64::from(reference_blocks) * u64::from(SECONDS_PER_BLOCK)).div_ceil(u64::from(seconds))
+}
+
+/// The block spacing of a chain for converting ZIP 318 reference blocks (75 seconds)
+/// to heights. The target spacing changes to 25 seconds at NU7 and 20 at NU7.1.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockSpacing {
     nu7_activation: Option<BlockHeight>,
+    nu7_1_activation: Option<BlockHeight>,
 }
 
 impl BlockSpacing {
-    /// The spacing of a chain on which NU7 does not activate: one block per reference block at
-    /// every height.
+    /// A chain with 75-second spacing at every height.
     pub const UNIFORM: Self = Self {
         nu7_activation: None,
+        nu7_1_activation: None,
     };
 
     /// The spacing of the chain that `params` describe.
     pub fn for_network<P: Parameters>(params: &P) -> Self {
         Self {
             nu7_activation: nu7_activation_height(params),
+            nu7_1_activation: params.activation_height(NetworkUpgrade::Nu7_1),
         }
     }
 
-    /// The spacing of a chain on which NU7 activates at `nu7_activation`.
+    /// A chain that adopts 25-second spacing at `nu7_activation`.
     pub const fn with_nu7_activation(nu7_activation: BlockHeight) -> Self {
         Self {
             nu7_activation: Some(nu7_activation),
+            ..Self::UNIFORM
         }
     }
 
-    /// The NU7 activation height of this chain, if NU7 activates on it.
+    /// The first height governed by NU7 or a later upgrade, if scheduled.
     pub fn nu7_activation(&self) -> Option<BlockHeight> {
         self.nu7_activation
     }
 
-    /// The number of blocks that one reference block spans at `height`: 1 before NU7 activation,
-    /// and [`NU7_POW_TARGET_SPACING_RATIO`] from activation.
-    pub fn blocks_per_reference_block(&self, height: BlockHeight) -> u32 {
-        match self.nu7_activation {
-            Some(activation) if height >= activation => NU7_POW_TARGET_SPACING_RATIO,
-            _ => 1,
-        }
+    /// Half-open height ranges and their spacing in seconds. If a local network
+    /// skips NU7, its 25-second range is empty.
+    fn eras(&self) -> [(core::ops::Range<u64>, u32); 3] {
+        let end = u64::from(u32::MAX) + 1;
+        let height = |h: Option<BlockHeight>| h.map_or(end, |h| u64::from(u32::from(h)));
+        let nu7 = height(self.nu7_activation);
+        let nu7_1 = height(self.nu7_1_activation);
+        [
+            (0..nu7, SECONDS_PER_BLOCK),
+            (nu7..nu7_1, SECONDS_PER_BLOCK / NU7_POW_TARGET_SPACING_RATIO),
+            (nu7_1..end, NU7_1_TARGET_SPACING),
+        ]
     }
 
-    /// Returns the height that is `reference_blocks` reference blocks after `from`. Saturates at
-    /// `u32::MAX`.
+    /// The target spacing in seconds at this height. Four reference blocks span
+    /// fifteen blocks when the target spacing is 20 seconds.
+    pub fn target_spacing_seconds(&self, height: BlockHeight) -> u32 {
+        self.eras()
+            .into_iter()
+            .find(|(range, _)| range.contains(&u64::from(u32::from(height))))
+            .expect("the eras cover every block height")
+            .1
+    }
+
+    /// Advances by a duration in reference blocks, rounding up to the first height
+    /// that reaches it. Saturates at `u32::MAX`.
     pub fn advance(&self, from: BlockHeight, reference_blocks: u32) -> BlockHeight {
-        let ratio = u64::from(NU7_POW_TARGET_SPACING_RATIO);
-        self.height_at(self.time_of(from) + u64::from(reference_blocks) * ratio)
+        self.height_at(
+            self.time_of(from) + u64::from(reference_blocks) * u64::from(SECONDS_PER_BLOCK),
+        )
     }
 
     /// Returns the height that is as long after `height` as `to` is after `from`, or `height` when
@@ -276,53 +294,42 @@ impl BlockSpacing {
         self.height_at(self.time_of(height) + elapsed)
     }
 
-    /// Returns whether `to` is more than `reference_blocks` reference blocks after `from`.
+    /// Returns whether the elapsed time exceeds the specified number of reference blocks.
     pub fn exceeds(&self, from: BlockHeight, to: BlockHeight, reference_blocks: u32) -> bool {
-        let ratio = u64::from(NU7_POW_TARGET_SPACING_RATIO);
-        self.time_of(to).saturating_sub(self.time_of(from)) > u64::from(reference_blocks) * ratio
+        self.time_of(to).saturating_sub(self.time_of(from))
+            > u64::from(reference_blocks) * u64::from(SECONDS_PER_BLOCK)
     }
 
-    /// The NU7 activation height as a `u64`, or one past `u32::MAX` when NU7 does not activate,
-    /// so that every height is below it.
-    fn activation(&self) -> u64 {
-        self.nu7_activation
-            .map_or(u64::from(u32::MAX) + 1, |h| u64::from(u32::from(h)))
-    }
-
-    /// The time at which `height` is reached, in units of the post-NU7 target spacing, measured
-    /// from the genesis block. Each block before activation adds the spacing ratio, and each block
-    /// from activation adds one.
+    // Time at a height in seconds. The step from h to h + 1 uses the spacing at h.
     fn time_of(&self, height: BlockHeight) -> u64 {
-        let ratio = u64::from(NU7_POW_TARGET_SPACING_RATIO);
-        let activation = self.activation();
         let h = u64::from(u32::from(height));
-        if h <= activation {
-            h * ratio
-        } else {
-            activation * ratio + (h - activation)
-        }
+        self.eras()
+            .into_iter()
+            .map(|(range, seconds)| {
+                h.min(range.end).saturating_sub(range.start) * u64::from(seconds)
+            })
+            .sum()
     }
 
-    /// The least height reached at or after `time`. Saturates at `u32::MAX`.
-    fn height_at(&self, time: u64) -> BlockHeight {
-        let ratio = u64::from(NU7_POW_TARGET_SPACING_RATIO);
-        let activation = self.activation();
-        let h = if time <= activation * ratio {
-            time.div_ceil(ratio)
-        } else {
-            activation + (time - activation * ratio)
-        };
-        BlockHeight::from_u32(u32::try_from(h).unwrap_or(u32::MAX))
+    fn height_at(&self, mut time: u64) -> BlockHeight {
+        for (range, seconds) in self.eras() {
+            let seconds = u64::from(seconds);
+            let duration = (range.end - range.start) * seconds;
+            if time <= duration {
+                let height = range.start + time.div_ceil(seconds);
+                return BlockHeight::from_u32(u32::try_from(height).unwrap_or(u32::MAX));
+            }
+            time -= duration;
+        }
+        BlockHeight::from_u32(u32::MAX)
     }
 }
 
 /// The boundary heights of an [`AnchorBucketInterval`] on a chain with a given [`BlockSpacing`].
 ///
-/// The interval is a number of reference blocks. Before NU7 activation a height is a boundary when
-/// it is a multiple of the interval. From activation it is a boundary when it is a multiple of the
-/// interval times [`NU7_POW_TARGET_SPACING_RATIO`], which keeps the boundaries the same time apart.
-/// Every boundary from activation is also a multiple of the interval, so a wallet that retains the
-/// checkpoint at every multiple of the interval retains every boundary.
+/// Within each spacing era, boundaries are multiples of the interval converted
+/// to blocks at that era's spacing. ZIP 318's 144-reference-block interval
+/// therefore has steps of 144, 432 and 540 blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnchorGrid {
     interval: AnchorBucketInterval,
@@ -345,60 +352,43 @@ impl AnchorGrid {
         self.spacing
     }
 
-    /// The distance in blocks between boundaries at heights from `height` onward, while the
-    /// spacing does not change.
-    fn step_at(&self, height: u64) -> u64 {
-        let ratio = if height >= self.spacing.activation() {
-            NU7_POW_TARGET_SPACING_RATIO
-        } else {
-            1
-        };
-        u64::from(self.interval.block_count().get()) * u64::from(ratio)
-    }
-
-    /// Returns whether `height` is a boundary of this grid, i.e. whether the checkpoint at
-    /// `height` is retained as a durable anchor.
+    /// Returns whether the wallet retains a durable anchor at this height.
     pub fn is_boundary(&self, height: BlockHeight) -> bool {
-        let h = u64::from(u32::from(height));
-        h.is_multiple_of(self.step_at(h))
+        let step = scaled_block_count(
+            self.interval.block_count().get(),
+            self.spacing.target_spacing_seconds(height),
+        );
+        u64::from(u32::from(height)).is_multiple_of(step)
     }
 
     /// Returns the greatest boundary height that does not exceed `height`.
     pub fn boundary_at_or_below(&self, height: BlockHeight) -> BlockHeight {
         let h = u64::from(u32::from(height));
-        let activation = self.spacing.activation();
-        let below = if h >= activation {
-            let candidate = h - h % self.step_at(h);
-            if candidate >= activation {
-                candidate
-            } else {
-                // No boundary lies in `[activation, h]`. Activation is positive here, because 0
-                // is a boundary of every step, so the greatest boundary below activation exists.
-                let last_before = activation - 1;
-                last_before - last_before % self.step_at(last_before)
+        for (range, seconds) in self.spacing.eras().into_iter().rev() {
+            if range.is_empty() || h < range.start {
+                continue;
             }
-        } else {
-            h - h % self.step_at(h)
-        };
-        BlockHeight::from_u32(u32::try_from(below).expect("at most `height`"))
+            let step = scaled_block_count(self.interval.block_count().get(), seconds);
+            let last = h.min(range.end - 1);
+            let candidate = last - last % step;
+            if candidate >= range.start {
+                return BlockHeight::from_u32(candidate as u32);
+            }
+        }
+        unreachable!("height zero is a boundary")
     }
 
     /// Returns the least boundary height that is not below `height`. Saturates at `u32::MAX`.
     pub fn boundary_at_or_above(&self, height: BlockHeight) -> BlockHeight {
         let h = u64::from(u32::from(height));
-        let activation = self.spacing.activation();
-        let round_up = |h: u64, step: u64| h.div_ceil(step) * step;
-        let above = if h >= activation {
-            round_up(h, self.step_at(h))
-        } else {
-            let candidate = round_up(h, self.step_at(h));
-            if candidate < activation {
-                candidate
-            } else {
-                round_up(activation, self.step_at(activation))
+        for (range, seconds) in self.spacing.eras() {
+            let step = scaled_block_count(self.interval.block_count().get(), seconds);
+            let candidate = h.max(range.start).div_ceil(step) * step;
+            if candidate < range.end {
+                return BlockHeight::from_u32(candidate as u32);
             }
-        };
-        BlockHeight::from_u32(u32::try_from(above).unwrap_or(u32::MAX))
+        }
+        BlockHeight::from_u32(u32::MAX)
     }
 
     /// Returns the greatest boundary height strictly below `height`, or `None` if `height` is 0.
@@ -432,7 +422,7 @@ pub struct AnchorBucketInterval(NonZeroU32);
 
 impl AnchorBucketInterval {
     /// The interval specified by [ZIP 318]: 144 reference blocks, about three hours (8 per day).
-    /// That is 144 blocks before NU7 activation and 432 blocks from activation.
+    /// The interval spans 144, 432, or 540 blocks at 75-, 25-, or 20-second spacing.
     ///
     /// [ZIP 318]: https://zips.z.cash/zip-0318
     pub const ZIP_318: Self = Self(NonZeroU32::new(144).expect("144 is nonzero"));
@@ -593,8 +583,22 @@ pub trait PoolMigrationConstants {
     /// in the modulus.
     fn is_canonical_expiry_value(&self, expiry: BlockHeight) -> bool {
         let (modulus, window) = self.expiry_window();
-        let expiry = u32::from(expiry);
-        expiry >= window && expiry % modulus == 0
+        if expiry == BlockHeight::from_u32(u32::MAX) {
+            // A rolling window that extends beyond the last height saturates here.
+            return true;
+        }
+        let expiry = u64::from(u32::from(expiry));
+        self.block_spacing()
+            .eras()
+            .into_iter()
+            .any(|(range, seconds)| {
+                let step = scaled_block_count(modulus, seconds);
+                let window = scaled_block_count(window, seconds);
+                !range.is_empty()
+                    && expiry
+                        .checked_sub(window)
+                        .is_some_and(|base| base.is_multiple_of(step))
+            })
     }
 }
 
@@ -1019,7 +1023,93 @@ mod tests {
                 s.advance(BlockHeight::from_u32(h), d),
                 BlockHeight::from_u32(h + d)
             );
-            assert_eq!(s.blocks_per_reference_block(BlockHeight::from_u32(h)), 1);
+            assert_eq!(s.target_spacing_seconds(BlockHeight::from_u32(h)), 75);
+        }
+    }
+
+    #[test]
+    fn durations_across_twenty_second_activation_round_only_the_final_height() {
+        let h = BlockHeight::from_u32;
+        let spacing = BlockSpacing {
+            nu7_activation: Some(h(100)),
+            nu7_1_activation: Some(h(102)),
+        };
+        assert_eq!(spacing.advance(h(99), 4), h(111)); // 75 + 2*25 + 9*20 >= 300 seconds
+        assert_eq!(spacing.advance(h(101), 1), h(105)); // 25 + 3*20 >= 75 seconds
+        assert_eq!(spacing.advance(h(102), 1), h(106));
+        assert_eq!(spacing.advance(h(103), 4), h(118));
+        assert_eq!(spacing.shift(h(103), h(99), h(103)), h(111)); // ceil(145 / 20)
+        assert!(!spacing.exceeds(h(102), h(117), 4));
+        assert!(spacing.exceeds(h(102), h(118), 4));
+        assert!(!spacing.exceeds(h(99), h(110), 4));
+        assert!(spacing.exceeds(h(99), h(111), 4));
+        assert_eq!(spacing.advance(h(u32::MAX - 1), 1), h(u32::MAX));
+    }
+
+    #[test]
+    fn anchor_grid_and_rolling_expiry_follow_the_spacing_at_the_target() {
+        let h = BlockHeight::from_u32;
+        // No 25-second grid boundary lies between the two upgrades.
+        let spacing = BlockSpacing {
+            nu7_activation: Some(h(145)),
+            nu7_1_activation: Some(h(150)),
+        };
+        let grid = AnchorGrid::new(AnchorBucketInterval::ZIP_318, spacing);
+        for (target, below, above) in [
+            (144, 144, 144),
+            (149, 144, 540),
+            (150, 144, 540),
+            (151, 144, 540),
+            (540, 540, 540),
+        ] {
+            assert_eq!(grid.boundary_at_or_below(h(target)), h(below));
+            assert_eq!(grid.boundary_at_or_above(h(target)), h(above));
+            assert_eq!(grid.is_boundary(h(target)), below == above);
+        }
+
+        #[derive(Clone)]
+        struct Scheduled(BlockSpacing);
+        impl PoolMigrationConstants for Scheduled {
+            fn block_spacing(&self) -> BlockSpacing {
+                self.0
+            }
+        }
+        let params = Scheduled(spacing);
+        for (target, expiry) in [
+            (144, 69_120),
+            (149, 207_360),
+            (150, 259_200),
+            (151, 259_200),
+            (129_600, 388_800),
+        ] {
+            assert_eq!(params.canonical_expiry(h(target)), h(expiry));
+            assert!(params.is_canonical_expiry_value(h(expiry)));
+            assert!(!params.is_canonical_expiry_value(h(expiry + 1)));
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn twenty_second_timing_matches_individual_block_steps(
+            first in 0u32..30, gap in 0u32..30, start in 0u32..75, delay in 0u32..20,
+            interval in 1u32..12,
+        ) {
+            let second = first + gap;
+            let spacing = BlockSpacing { nu7_activation: Some(first.into()), nu7_1_activation: Some(second.into()) };
+            let seconds_at = |h| if h < first { 75 } else if h < second { 25 } else { 20 };
+            let mut expected = start;
+            let mut elapsed = 0;
+            while elapsed < delay * 75 {
+                elapsed += seconds_at(expected);
+                expected += 1;
+            }
+            prop_assert_eq!(spacing.advance(start.into(), delay), expected.into());
+            let grid = AnchorGrid::new(AnchorBucketInterval::custom(NonZeroU32::new(interval).unwrap()), spacing);
+            let boundary = |h: &u32| h.is_multiple_of((interval * 75).div_ceil(seconds_at(*h)));
+            let below = (0..=start).rev().find(boundary).unwrap();
+            let above = (start..).find(boundary).unwrap();
+            prop_assert_eq!(grid.boundary_at_or_below(start.into()), below.into());
+            prop_assert_eq!(grid.boundary_at_or_above(start.into()), above.into());
         }
     }
 
