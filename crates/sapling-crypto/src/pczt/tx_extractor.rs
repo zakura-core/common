@@ -166,6 +166,12 @@ impl<V> crate::Bundle<Unbound, V> {
     /// Verifies the given sighash with every `spend_auth_sig`, and then binds the bundle.
     ///
     /// Returns `None` if the given sighash does not validate against every `spend_auth_sig`.
+    ///
+    /// Every signature here signs the one `sighash`, as in transactions before v7. A v7
+    /// transaction ([ZIP 248]) gives each signature its own digest, which these roles do
+    /// not support yet; for such a bundle the result does not verify.
+    ///
+    /// [ZIP 248]: https://zips.z.cash/zip-0248
     pub fn apply_binding_signature<R: Rng + CryptoRng>(
         self,
         sighash: [u8; 32],

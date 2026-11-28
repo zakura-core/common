@@ -1385,7 +1385,7 @@ fn v7_is_rejected_outside_nu7_1() {
 
 #[test]
 fn prepared_signatures_read_previous_outputs_only_once() {
-    let tv = &super::vectors::TEST_VECTORS[SHIELDING];
+    let tv = &super::vectors::TEST_VECTORS[STANDARD];
     let (_, tx) = verifying_vector(tv);
     let bundle = tx.transparent_bundle().unwrap();
     let prev = &bundle.authorization;
@@ -1406,6 +1406,13 @@ fn prepared_signatures_read_previous_outputs_only_once() {
             .signature_hash(&SignableInput::Transparent(input))
             .unwrap();
         assert_eq!(hex::encode(digest.as_ref()), tv.sighashes[index].1);
+    }
+    for pool in [
+        ShieldedBundleType::Sapling,
+        ShieldedBundleType::Orchard,
+        ShieldedBundleType::Ironwood,
+    ] {
+        prepared.shielded_sighashes(pool).unwrap();
     }
     assert_eq!(
         prev.reads.get(),
@@ -1928,5 +1935,54 @@ fn typed_decoding_rejects_a_zip_233_delta() {
         add_delta(&mut deltas);
         let envelope = Envelope::new(header, deltas, effects, auths).unwrap();
         envelope.txid(|_| None).unwrap();
+    }
+}
+
+#[test]
+fn shielded_sighashes_match_each_signature_digest() {
+    use crate::transaction::sighash::V7SignatureHashes;
+    use orchard::bundle::SignatureDigests as _;
+
+    for tv in super::vectors::TEST_VECTORS {
+        let (_, verifying) = verifying_vector(tv);
+        let prepared = V7SignatureHashes::new(&verifying).unwrap();
+        let mut expected = tv
+            .sighashes
+            .iter()
+            .filter(|(label, _)| label.starts_with("s "));
+        for (bundle_type, count) in [
+            (
+                ShieldedBundleType::Sapling,
+                verifying
+                    .sapling_bundle()
+                    .map(|b| b.shielded_spends().len()),
+            ),
+            (
+                ShieldedBundleType::Orchard,
+                verifying.orchard_bundle().map(|b| b.actions().len()),
+            ),
+            (
+                ShieldedBundleType::Ironwood,
+                verifying.ironwood_bundle().map(|b| b.actions().len()),
+            ),
+        ] {
+            let sighashes = prepared.shielded_sighashes(bundle_type);
+            let Some(count) = count else {
+                assert_eq!(sighashes, Err(SighashError::MissingBundle(bundle_type)));
+                continue;
+            };
+            let sighashes = sighashes.unwrap();
+            let pool = BundleType::from(bundle_type).id();
+            for index in 0..count {
+                let (label, digest) = expected.next().unwrap();
+                assert_eq!(*label, alloc::format!("s {pool} {index}"));
+                assert_eq!(hex::encode(sighashes.spend_auth(index).unwrap()), *digest);
+            }
+            let (label, digest) = expected.next().unwrap();
+            assert_eq!(*label, alloc::format!("s {pool} b"));
+            assert_eq!(hex::encode(sighashes.binding()), *digest);
+            assert_eq!(sighashes.spend_auth(count), None);
+        }
+        assert!(expected.next().is_none());
     }
 }

@@ -86,7 +86,7 @@ impl core::error::Error for SighashError {}
 
 pub struct SignatureHash(pub(super) Blake2bHash);
 
-pub use super::sighash_v7::V7SignatureHashes;
+pub use super::sighash_v7::{V7ShieldedSighashes, V7SignatureHashes};
 
 impl AsRef<[u8; 32]> for SignatureHash {
     fn as_ref(&self) -> &[u8; 32] {

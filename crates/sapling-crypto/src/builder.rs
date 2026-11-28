@@ -15,7 +15,7 @@ use zcash_note_encryption::EphemeralKeyBytes;
 use crate::{
     Anchor, Diversifier, MerklePath, NOTE_COMMITMENT_TREE_DEPTH, Node, Note, Nullifier,
     PaymentAddress, SaplingIvk,
-    bundle::{Authorization, Authorized, Bundle, GrothProofBytes},
+    bundle::{Authorization, Authorized, Bundle, GrothProofBytes, SignatureDigests},
     keys::{
         EphemeralSecretKey, ExpandedSpendingKey, FullViewingKey, OutgoingViewingKey,
         SpendAuthorizingKey, SpendValidatingKey,
@@ -132,6 +132,11 @@ pub enum Error {
     InvalidAmount,
     /// External signature is not valid.
     InvalidExternalSignature,
+    /// The digest provider did not cover the spend at this position.
+    MissingSignatureDigest {
+        /// Zero-based position in the final bundle order.
+        index: usize,
+    },
     /// A bundle could not be built because required signatures were missing.
     MissingSignatures,
     /// A required spending key was not provided.
@@ -156,6 +161,9 @@ impl fmt::Display for Error {
             Error::InvalidAddress => write!(f, "Invalid address"),
             Error::InvalidAmount => write!(f, "Invalid amount"),
             Error::InvalidExternalSignature => write!(f, "External signature was invalid"),
+            Error::MissingSignatureDigest { index } => {
+                write!(f, "Missing signature digest for spend {index}")
+            }
             Error::MissingSignatures => write!(f, "Required signatures were missing during build"),
             Error::MissingSpendingKey => write!(f, "A required spending key was not provided"),
             Error::PcztRequiresZip212 => {
@@ -1172,7 +1180,8 @@ pub struct SigningParts {
 #[derive(Clone, Debug)]
 pub struct PartiallyAuthorized {
     binding_signature: redjubjub::Signature<Binding>,
-    sighash: [u8; 32],
+    /// The digest each spend's authorization signature signs, in spend order.
+    spend_auth_sighashes: Vec<[u8; 32]>,
 }
 
 /// Container for metadata needed to sign a Sapling input.
@@ -1212,32 +1221,48 @@ impl MaybeSigned {
 }
 
 impl<P: InProgressProofs, V> Bundle<InProgress<P, Unsigned>, V> {
-    /// Loads the sighash into this bundle, preparing it for signing.
+    /// Loads the signature digests into this bundle, preparing it for signing.
     ///
-    /// This API ensures that all signatures are created over the same sighash.
+    /// Returns [`Error::MissingSignatureDigest`] for the first spend without a digest.
+    ///
+    /// `sighashes` supplies the digest each signature signs: a `[u8; 32]` for a bundle of
+    /// a transaction before v7, whose signatures share one digest.
     pub fn prepare<R: Rng + CryptoRng>(
         self,
         mut rng: R,
-        sighash: [u8; 32],
-    ) -> Bundle<InProgress<P, PartiallyAuthorized>, V> {
-        self.map_authorization(
-            &mut rng,
+        sighashes: impl SignatureDigests,
+    ) -> Result<Bundle<InProgress<P, PartiallyAuthorized>, V>, Error> {
+        let spend_auth_sighashes: Vec<_> = (0..self.shielded_spends().len())
+            .map(|index| {
+                sighashes
+                    .spend_auth(index)
+                    .ok_or(Error::MissingSignatureDigest { index })
+            })
+            .collect::<Result<_, _>>()?;
+        // `map_authorization` visits the spends in order, so the counter is each spend's
+        // index.
+        Ok(self.map_authorization(
+            (&mut rng, 0usize),
             |_, proof| proof,
             |_, proof| proof,
-            |rng, SigningMetadata { dummy_ask, parts }| match dummy_ask {
-                None => MaybeSigned::SigningParts(parts),
-                Some(ask) => {
-                    MaybeSigned::Signature(ask.randomize(&parts.alpha).sign(rng, &sighash))
+            |(rng, index), SigningMetadata { dummy_ask, parts }| {
+                let sighash = spend_auth_sighashes[*index];
+                *index += 1;
+                match dummy_ask {
+                    None => MaybeSigned::SigningParts(parts),
+                    Some(ask) => MaybeSigned::Signature(
+                        ask.randomize(&parts.alpha).sign(&mut **rng, &sighash),
+                    ),
                 }
             },
-            |rng, auth: InProgress<P, Unsigned>| InProgress {
+            |(rng, _), auth: InProgress<P, Unsigned>| InProgress {
                 sigs: PartiallyAuthorized {
-                    binding_signature: auth.sigs.bsk.sign(rng, &sighash),
-                    sighash,
+                    binding_signature: auth.sigs.bsk.sign(&mut **rng, &sighashes.binding()),
+                    spend_auth_sighashes: spend_auth_sighashes.clone(),
                 },
                 _proof_state: PhantomData,
             },
-        )
+        ))
     }
 }
 
@@ -1246,15 +1271,17 @@ impl<V> Bundle<InProgress<Proven, Unsigned>, V> {
     ///
     /// This is a helper method that wraps [`Bundle::prepare`], [`Bundle::sign`], and
     /// [`Bundle::finalize`].
+    ///
+    /// Returns [`Error::MissingSignatureDigest`] for the first spend without a digest.
     pub fn apply_signatures<R: Rng + CryptoRng>(
         self,
         mut rng: R,
-        sighash: [u8; 32],
+        sighashes: impl SignatureDigests,
         signing_keys: &[SpendAuthorizingKey],
     ) -> Result<Bundle<Authorized, V>, Error> {
         signing_keys
             .iter()
-            .fold(self.prepare(&mut rng, sighash), |partial, ask| {
+            .fold(self.prepare(&mut rng, sighashes)?, |partial, ask| {
                 partial.sign(&mut rng, ask)
             })
             .finalize()
@@ -1267,16 +1294,24 @@ impl<P: InProgressProofs, V> Bundle<InProgress<P, PartiallyAuthorized>, V> {
     /// This will apply signatures for all notes controlled by this spending key.
     pub fn sign<R: Rng + CryptoRng>(self, mut rng: R, ask: &SpendAuthorizingKey) -> Self {
         let expected_ak = ask.into();
-        let sighash = self.authorization().sigs.sighash;
+        let sighashes = self.authorization().sigs.spend_auth_sighashes.clone();
+        // `map_authorization` visits the spends in order, so the counter is each spend's
+        // index.
         self.map_authorization(
-            &mut rng,
+            (&mut rng, 0usize),
             |_, proof| proof,
             |_, proof| proof,
-            |rng, maybe| match maybe {
-                MaybeSigned::SigningParts(parts) if parts.ak == expected_ak => {
-                    MaybeSigned::Signature(ask.randomize(&parts.alpha).sign(rng, &sighash))
+            |(rng, index), maybe| {
+                let sighash = sighashes[*index];
+                *index += 1;
+                match maybe {
+                    MaybeSigned::SigningParts(parts) if parts.ak == expected_ak => {
+                        MaybeSigned::Signature(
+                            ask.randomize(&parts.alpha).sign(&mut **rng, &sighash),
+                        )
+                    }
+                    s => s,
                 }
-                s => s,
             },
             |_, partial| partial,
         )
@@ -1295,24 +1330,30 @@ impl<P: InProgressProofs, V> Bundle<InProgress<P, PartiallyAuthorized>, V> {
     }
 
     fn append_signature(self, signature: &redjubjub::Signature<SpendAuth>) -> Result<Self, Error> {
-        let sighash = self.authorization().sigs.sighash;
+        let sighashes = self.authorization().sigs.spend_auth_sighashes.clone();
         let mut signature_valid_for = 0usize;
+        // `map_authorization` visits the spends in order, so the counter is each spend's
+        // index.
         let bundle = self.map_authorization(
-            &mut signature_valid_for,
+            (&mut signature_valid_for, 0usize),
             |_, proof| proof,
             |_, proof| proof,
-            |ctx, maybe| match maybe {
-                MaybeSigned::SigningParts(parts) => {
-                    let rk = parts.ak.randomize(&parts.alpha);
-                    if rk.verify(&sighash, signature).is_ok() {
-                        **ctx += 1;
-                        MaybeSigned::Signature(*signature)
-                    } else {
-                        // Signature isn't for this input.
-                        MaybeSigned::SigningParts(parts)
+            |(valid_for, index), maybe| {
+                let sighash = sighashes[*index];
+                *index += 1;
+                match maybe {
+                    MaybeSigned::SigningParts(parts) => {
+                        let rk = parts.ak.randomize(&parts.alpha);
+                        if rk.verify(&sighash, signature).is_ok() {
+                            **valid_for += 1;
+                            MaybeSigned::Signature(*signature)
+                        } else {
+                            // Signature isn't for this input.
+                            MaybeSigned::SigningParts(parts)
+                        }
                     }
+                    s => s,
                 }
-                s => s,
             },
             |_, partial| partial,
         );
@@ -1352,6 +1393,194 @@ mod tests {
         Anchor,
         prover::mock::{MockOutputProver, MockSpendProver},
     };
+
+    /// Signature digests that differ for every signature, as in a v7 transaction.
+    struct PerSignatureDigests;
+
+    impl crate::bundle::SignatureDigests for PerSignatureDigests {
+        fn spend_auth(&self, index: usize) -> Option<[u8; 32]> {
+            Some([u8::try_from(index).unwrap() + 1; 32])
+        }
+
+        fn binding(&self) -> [u8; 32] {
+            [0xbb; 32]
+        }
+    }
+
+    /// The dummy spend that `prepare` signs and the binding signature each sign the digest
+    /// for their own position.
+    #[cfg(feature = "wallet")]
+    #[test]
+    fn prepare_signs_each_signature_over_its_own_digest() {
+        use crate::{bundle::SignatureDigests, value::CommitmentSum};
+
+        let mut rng = StdRng::seed_from_u64(0);
+        let builder = Builder::new(
+            Zip212Enforcement::On,
+            BundleType::Transactional {
+                bundle_required: true,
+            },
+            Anchor::empty_tree(),
+        );
+        let (bundle, _) = builder
+            .build::<MockSpendProver, MockOutputProver, _, i64>(&[], &mut rng)
+            .unwrap()
+            .unwrap();
+        let bundle = bundle
+            .create_proofs(&MockSpendProver, &MockOutputProver, &mut rng, ())
+            .apply_signatures(&mut rng, PerSignatureDigests, &[])
+            .unwrap();
+
+        assert_eq!(bundle.shielded_spends().len(), 1);
+        let spend = &bundle.shielded_spends()[0];
+        assert!(
+            spend
+                .rk()
+                .verify(
+                    &PerSignatureDigests.spend_auth(0).unwrap(),
+                    spend.spend_auth_sig()
+                )
+                .is_ok()
+        );
+        assert!(
+            spend
+                .rk()
+                .verify(&PerSignatureDigests.binding(), spend.spend_auth_sig())
+                .is_err()
+        );
+
+        let bvk = (CommitmentSum::try_sum(bundle.shielded_spends().iter().map(|s| s.cv()))
+            .unwrap()
+            - CommitmentSum::try_sum(bundle.shielded_outputs().iter().map(|o| o.cv())).unwrap())
+        .into_bvk(*bundle.value_balance());
+        assert!(
+            bvk.verify(
+                &PerSignatureDigests.binding(),
+                &bundle.authorization().binding_sig
+            )
+            .is_ok()
+        );
+    }
+
+    #[cfg(feature = "wallet")]
+    #[test]
+    fn local_and_external_signatures_follow_final_spend_order() {
+        use super::{Error, ExtendedSpendingKey};
+        use crate::{
+            CommitmentTree, Diversifier, IncrementalWitness, Node, Rseed,
+            bundle::SignatureDigests,
+            value::{CommitmentSum, NoteValue},
+        };
+        let mut rng = StdRng::seed_from_u64(1);
+        let keys = [
+            ExtendedSpendingKey::master(&[1; 32]),
+            ExtendedSpendingKey::master(&[2; 32]),
+        ];
+        let notes = keys.each_ref().map(|key| {
+            key.to_diversifiable_full_viewing_key()
+                .diversified_address(Diversifier([0; 11]))
+                .expect("the all-zero Sapling diversifier is valid")
+                .create_note(NoteValue::from_raw(1), Rseed::AfterZip212([3; 32]))
+        });
+        let [first, second] = notes.each_ref().map(|note| Node::from_cmu(&note.cmu()));
+        let mut tree = CommitmentTree::empty();
+        tree.append(first).unwrap();
+        let mut first_witness = IncrementalWitness::from_tree(tree.clone()).unwrap();
+        first_witness.append(second).unwrap();
+        tree.append(second).unwrap();
+        let mut builder = Builder::new(
+            Zip212Enforcement::On,
+            BundleType::Transactional {
+                bundle_required: true,
+            },
+            tree.root().into(),
+        );
+        let witnesses = [first_witness, IncrementalWitness::from_tree(tree).unwrap()];
+        for ((key, note), witness) in keys.iter().zip(notes).zip(witnesses) {
+            builder
+                .add_spend(
+                    key.to_diversifiable_full_viewing_key().fvk().clone(),
+                    note,
+                    witness.path().unwrap(),
+                )
+                .unwrap();
+        }
+        let (bundle, order) = builder
+            .build::<MockSpendProver, MockOutputProver, _, i64>(&keys, &mut rng)
+            .unwrap()
+            .unwrap();
+        let proven = bundle.create_proofs(&MockSpendProver, &MockOutputProver, &mut rng, ());
+        assert_eq!(proven.shielded_spends().len(), 2);
+        struct FirstSpendOnly;
+        impl SignatureDigests for FirstSpendOnly {
+            fn spend_auth(&self, index: usize) -> Option<[u8; 32]> {
+                (index == 0).then_some([1; 32])
+            }
+            fn binding(&self) -> [u8; 32] {
+                PerSignatureDigests.binding()
+            }
+        }
+        assert!(matches!(
+            proven.clone().prepare(&mut rng, FirstSpendOnly),
+            Err(Error::MissingSignatureDigest { index: 1 })
+        ));
+        assert!(matches!(
+            proven
+                .clone()
+                .apply_signatures(&mut rng, FirstSpendOnly, &[]),
+            Err(Error::MissingSignatureDigest { index: 1 })
+        ));
+
+        let local = order.spend_index(0).unwrap();
+        let external = order.spend_index(1).unwrap();
+        let randomized_key = keys[1].expsk.ask.randomize(
+            &proven.shielded_spends()[external]
+                .spend_auth_sig()
+                .parts
+                .alpha,
+        );
+        let digest = |index| PerSignatureDigests.spend_auth(index).unwrap();
+        let partial = proven
+            .prepare(&mut rng, PerSignatureDigests)
+            .unwrap()
+            .sign(&mut rng, &keys[0].expsk.ask);
+        let misplaced = randomized_key.sign(&mut rng, &digest(local));
+        assert!(matches!(
+            partial.clone().append_signatures(&[misplaced]),
+            Err(Error::InvalidExternalSignature)
+        ));
+        let signature = randomized_key.sign(&mut rng, &digest(external));
+        let signed = partial
+            .append_signatures(&[signature])
+            .unwrap()
+            .finalize()
+            .unwrap();
+        for (index, spend) in signed.shielded_spends().iter().enumerate() {
+            assert!(
+                spend
+                    .rk()
+                    .verify(&digest(index), spend.spend_auth_sig())
+                    .is_ok()
+            );
+            assert!(
+                spend
+                    .rk()
+                    .verify(&digest(1 - index), spend.spend_auth_sig())
+                    .is_err()
+            );
+        }
+        let bvk = (CommitmentSum::try_sum(signed.shielded_spends().iter().map(|s| s.cv()))
+            .unwrap()
+            - CommitmentSum::try_sum(signed.shielded_outputs().iter().map(|o| o.cv())).unwrap())
+        .into_bvk(*signed.value_balance());
+        assert!(
+            bvk.verify(
+                &PerSignatureDigests.binding(),
+                &signed.authorization().binding_sig
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn coinbase_without_outputs_builds_no_bundle() {

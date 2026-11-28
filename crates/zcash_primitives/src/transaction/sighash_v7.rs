@@ -115,6 +115,30 @@ where
         Ok(Self { tx, spent, prefix })
     }
 
+    /// Collects the spend authorization and binding digests of one shielded bundle.
+    /// Reuse this prepared transaction to request the digests for each pool.
+    ///
+    /// Returns an error if the pool is absent or a spend index exceeds two bytes.
+    pub fn shielded_sighashes(
+        &self,
+        bundle_type: ShieldedBundleType,
+    ) -> Result<V7ShieldedSighashes, SighashError> {
+        let count = shielded_signature_count(self.tx, bundle_type)?;
+        let digest = |signature| {
+            self.signature_hash(&SignableInput::V7Shielded {
+                bundle_type,
+                signature,
+            })
+            .map(|digest| *digest.as_ref())
+        };
+        Ok(V7ShieldedSighashes {
+            spend_auth: (0..count)
+                .map(|index| digest(ShieldedSignature::SpendAuth { index }))
+                .collect::<Result<_, _>>()?,
+            binding: digest(ShieldedSignature::Binding)?,
+        })
+    }
+
     /// Computes the digest for a single signer using the prepared commitments.
     pub fn signature_hash(
         &self,
@@ -269,4 +293,42 @@ fn index_bytes(index: usize) -> Result<[u8; 2], SighashError> {
     u16::try_from(index)
         .map(u16::to_le_bytes)
         .map_err(|_| SighashError::IndexOutOfRange)
+}
+
+/// The digests that the signatures of one Sapling, Orchard, or Ironwood bundle of a v7
+/// transaction sign: one per spend authorization signature, and one for the binding
+/// signature.
+///
+/// Obtain these digests from [`V7SignatureHashes::shielded_sighashes`] and pass them
+/// to the corresponding bundle's builder or batch validator.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct V7ShieldedSighashes {
+    spend_auth: Vec<[u8; 32]>,
+    binding: [u8; 32],
+}
+
+impl V7ShieldedSighashes {
+    fn spend_auth_digest(&self, index: usize) -> Option<[u8; 32]> {
+        self.spend_auth.get(index).copied()
+    }
+}
+
+impl sapling::bundle::SignatureDigests for V7ShieldedSighashes {
+    fn spend_auth(&self, index: usize) -> Option<[u8; 32]> {
+        self.spend_auth_digest(index)
+    }
+
+    fn binding(&self) -> [u8; 32] {
+        self.binding
+    }
+}
+
+impl orchard::bundle::SignatureDigests for V7ShieldedSighashes {
+    fn spend_auth(&self, index: usize) -> Option<[u8; 32]> {
+        self.spend_auth_digest(index)
+    }
+
+    fn binding(&self) -> [u8; 32] {
+        self.binding
+    }
 }
