@@ -11,7 +11,7 @@
 
 use core::fmt;
 
-use zcash_protocol::value::ZatBalance;
+use zcash_protocol::{consensus::BranchId, value::ZatBalance};
 
 use super::{registry::BundleType, transparent};
 use crate::transaction::{
@@ -22,6 +22,8 @@ use crate::transaction::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BundleRuleError {
+    /// The transaction version is unavailable in this consensus branch.
+    UnsupportedBranch(BranchId),
     /// A value pool delta has no effecting bundle of its type.
     DeltaWithoutBundle(BundleType),
     /// A coinbase transaction spends from the pool of this bundle type: it has
@@ -37,6 +39,10 @@ pub enum BundleRuleError {
 impl fmt::Display for BundleRuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::UnsupportedBranch(branch) => write!(
+                f,
+                "v7 transactions are not valid in consensus branch {branch:?}"
+            ),
             Self::DeltaWithoutBundle(t) => {
                 write!(
                     f,
@@ -84,6 +90,9 @@ pub(crate) fn check_bundle_local_rules<A: Authorization>(
     let Some(fields) = &tx.v7 else {
         return Ok(());
     };
+    if !tx.version.valid_in_branch(tx.consensus_branch_id) {
+        return Err(BundleRuleError::UnsupportedBranch(tx.consensus_branch_id));
+    }
     let deltas = &fields.value_deltas;
     if deltas.transparent != ZatBalance::zero() && tx.transparent_bundle.is_none() {
         return Err(BundleRuleError::DeltaWithoutBundle(BundleType::TRANSPARENT));

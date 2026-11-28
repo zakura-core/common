@@ -1149,7 +1149,34 @@ fn hand_written_bundle_lists_follow_the_registry() {
 
 #[test]
 fn v7_is_rejected_outside_nu7_1() {
-    let bytes = hex::decode(super::vectors::TEST_VECTORS[0].tx.as_bytes()).unwrap();
+    let bytes = hex::decode(super::vectors::TEST_VECTORS[MINIMAL_COINBASE].tx.as_bytes()).unwrap();
+    let coinbase = Transaction::read(&bytes[..], BranchId::Nu7_1).unwrap();
+    let construct = |branch| {
+        TransactionData::<Authorized>::from_parts_v7(
+            branch,
+            coinbase.lock_time(),
+            coinbase.expiry_height(),
+            coinbase.transparent_bundle().cloned(),
+            None,
+            None,
+            None,
+            coinbase.v7_fields().unwrap().clone(),
+        )
+    };
+    assert_eq!(
+        construct(BranchId::Nu7).err(),
+        Some(crate::transaction::v7::BundleRuleError::UnsupportedBranch(
+            BranchId::Nu7
+        )),
+    );
+    let mut written = Vec::new();
+    construct(BranchId::Nu7_1)
+        .unwrap()
+        .freeze()
+        .unwrap()
+        .write(&mut written)
+        .unwrap();
+    assert_eq!(written, bytes);
     let (mut header, deltas, effects, auths) = Envelope::read(&bytes[..]).unwrap().into_parts();
     header.consensus_branch_id = BranchId::Nu7.into();
     let mut edited = Vec::new();

@@ -436,7 +436,8 @@ impl<A: Authorization> TransactionData<A> {
     /// as for [`TransactionData::from_parts_v6`]. A transparent bundle with neither inputs
     /// nor outputs is dropped, since v7 encodes it by omitting it.
     ///
-    /// Returns an error if the parts violate a ZIP 248 bundle-local rule: a transparent or
+    /// Returns an error if v7 is unavailable in the consensus branch or if the parts
+    /// violate a ZIP 248 bundle-local rule: a transparent or
     /// coinbase value pool delta without its bundle, a coinbase transaction that spends,
     /// or an Orchard or Ironwood bundle whose version is not that of its pool in this
     /// consensus branch. The rules that relate the values of the bundles to each other or to the
