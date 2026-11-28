@@ -1580,6 +1580,7 @@ impl Proof {
         circuits: &[Circuit],
         instances: &[Instance],
         rng: &mut dyn Rng,
+        cancellation: &super::ProofCancellation,
     ) -> Result<Self, plonk::Error> {
         if !pk.circuit_version.supports_proving()
             || circuits
@@ -1621,33 +1622,36 @@ impl Proof {
                     .iter()
                     .map(CircuitWithPreparedMerklePath::new)
                     .collect();
-                plonk::create_proof(
+                plonk::create_proof_cancellable(
                     &pk.params,
                     &pk.pk,
                     &circuits,
                     &instances,
                     &mut *rng,
                     &mut transcript,
+                    &|| cancellation.is_cancelled(),
                 )?;
             } else {
-                plonk::create_proof(
+                plonk::create_proof_cancellable(
                     &pk.params,
                     &pk.pk,
                     circuits,
                     &instances,
                     &mut *rng,
                     &mut transcript,
+                    &|| cancellation.is_cancelled(),
                 )?;
             }
         }
         #[cfg(not(feature = "multicore"))]
-        plonk::create_proof(
+        plonk::create_proof_cancellable(
             &pk.params,
             &pk.pk,
             circuits,
             &instances,
             &mut *rng,
             &mut transcript,
+            &|| cancellation.is_cancelled(),
         )?;
         Ok(Proof(transcript.finalize()))
     }
@@ -2716,7 +2720,10 @@ mod tests {
 /// any error the backend returns is a broken internal invariant rather than a property of
 /// the request.
 #[cfg(feature = "prover")]
-fn prover_error(_error: plonk::Error) -> ProofError {
+fn prover_error(error: plonk::Error) -> ProofError {
+    if matches!(error, plonk::Error::Cancelled) {
+        return ProofError::Cancelled;
+    }
     ProofError::InternalInvariant
 }
 
@@ -2742,7 +2749,24 @@ impl Proof {
         pk: &ProvingKey,
         circuits: &[Circuit],
         instances: &[Instance],
+        rng: impl Rng,
+    ) -> Result<Self, ProofError> {
+        Self::create_cancellable(
+            pk,
+            circuits,
+            instances,
+            rng,
+            &super::ProofCancellation::default(),
+        )
+    }
+
+    #[cfg(feature = "prover")]
+    pub(crate) fn create_cancellable(
+        pk: &ProvingKey,
+        circuits: &[Circuit],
+        instances: &[Instance],
         mut rng: impl Rng,
+        cancellation: &super::ProofCancellation,
     ) -> Result<Self, ProofError> {
         if !pk.circuit_version.supports_proving()
             || circuits.is_empty()
@@ -2755,7 +2779,7 @@ impl Proof {
         }
         // Erase the RNG type so the halo2 prover is monomorphized once, in this
         // crate, rather than in every caller for every RNG type it uses.
-        Self::create_halo2(pk, circuits, instances, &mut rng).map_err(prover_error)
+        Self::create_halo2(pk, circuits, instances, &mut rng, cancellation).map_err(prover_error)
     }
 
     /// Verifies a proof for the selected protocol version and ordered statements.
