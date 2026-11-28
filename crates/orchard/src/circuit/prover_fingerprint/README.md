@@ -12,7 +12,7 @@ preserve the independently pinned witness inputs, RNG tapes, and proof bytes.
 The bytes were extracted without regeneration from `capturedProof` and the
 `.rng64` entries of `capturedEvents` in these pinned fixtures:
 
-- [SingleAction.lean](https://github.com/zakura-core/ironwood-formal-verification/blob/6e36616dda3a49bfe504e9c1364a7f49a8cd41e5/Zcash/Snark/Fixtures/Prover/SingleAction.lean)
+- [SingleAction.lean](https://raw.githubusercontent.com/zakura-core/ironwood-formal-verification/6e36616dda3a49bfe504e9c1364a7f49a8cd41e5/Zcash/Snark/Fixtures/Prover/SingleAction.lean)
 - [MultiAction.lean](https://raw.githubusercontent.com/zakura-core/ironwood-formal-verification/6e36616dda3a49bfe504e9c1364a7f49a8cd41e5/Zcash/Snark/Fixtures/Prover/MultiAction.lean)
 
 Their authenticated Common producer is
