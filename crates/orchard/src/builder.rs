@@ -940,12 +940,24 @@ impl Builder {
     }
 
     /// Returns the bundle type this builder was constructed with.
-    ///
-    /// Lets callers that must predict the builder's action count (e.g. fee
-    /// calculation) read back the exact [`BundleType`] the bundle will be built
-    /// with, so the two cannot drift.
     pub fn bundle_type(&self) -> BundleType {
         self.bundle_type
+    }
+
+    /// Returns the padded number of actions for the spends, outputs, and change added so far.
+    pub fn num_actions(&self) -> Result<usize, &'static str> {
+        let outputs = self
+            .outputs
+            .len()
+            .checked_add(self.changes.len())
+            .ok_or("num_outputs + num_changes overflowed")?;
+        self.bundle_type
+            .num_actions(self.flags, self.spends.len(), outputs)
+    }
+
+    /// Returns the bundle version used to construct notes and actions.
+    pub fn bundle_version(&self) -> BundleVersion {
+        self.bundle_version
     }
 
     /// Returns the note version associated with this builder's bundle version.
