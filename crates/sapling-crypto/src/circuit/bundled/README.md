@@ -10,7 +10,7 @@ a verification-only consumer must omit `zakura-proofs/bundled-prover`.
 The files were extracted from `wagyu-zcash-parameters` 0.2.0, previously bundled
 by `zakura-proofs` 2.2.0. Before extraction, the reconstructed parameter files
 were checked against the BLAKE2b-512 hashes in that version's
-[`zcash_proofs::parse_parameters`](https://github.com/zakura-core/common/blob/v2.2.0/crates/zcash_proofs/src/lib.rs).
+[`zcash_proofs::parse_parameters`](https://raw.githubusercontent.com/zakura-core/common/v2.2.0/crates/zcash_proofs/src/lib.rs).
 The spend file concatenates the five `sapling-spend-N.params` segments from
 `wagyu-zcash-parameters-1` through `-5`. The output file is
 `sapling-output-1.params` from `wagyu-zcash-parameters-6`.
