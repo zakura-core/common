@@ -1736,6 +1736,22 @@ fn transaction_local_rules_reject_each_violation() {
     assert_eq!(spends_only.check_v7_transaction_rules(), Err(E::NoOutputs));
 }
 
+/// A null previous output marks the coinbase input of earlier transaction versions. No
+/// v7 input has one, since a v7 coinbase transaction has no transparent inputs.
+#[test]
+fn transaction_local_rules_reject_a_null_previous_output() {
+    use crate::transaction::v7::TransactionRuleError as E;
+
+    let mut tx = vector_data(STANDARD);
+    let input = &mut tx.transparent_bundle.as_mut().unwrap().vin[0];
+    *input = TxIn::from_parts(
+        transparent::OutPoint::NULL,
+        input.script_sig().clone(),
+        input.sequence(),
+    );
+    assert_eq!(tx.check_v7_transaction_rules(), Err(E::NullPrevout));
+}
+
 /// The flags byte is the last byte of an Orchard or Ironwood bundle's effecting data.
 fn set_flags(effects: &mut [BundleData], bundle_type: BundleType, flags: u8) {
     let bundle = position(effects, bundle_type);
