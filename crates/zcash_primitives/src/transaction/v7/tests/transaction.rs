@@ -1199,6 +1199,57 @@ fn hand_written_bundle_lists_follow_the_registry() {
 }
 
 #[test]
+fn coinbase_readers_agree_on_payload_boundaries() {
+    use crate::transaction::v7::{BundleData, coinbase};
+
+    let payload = |tail: &[u8]| {
+        let mut data = vec![0; 20];
+        data[0] = 1;
+        data.extend_from_slice(tail);
+        BundleData {
+            bundle: BundleId::COINBASE,
+            data,
+        }
+    };
+
+    for tail in [
+        &[][..],
+        &[1],
+        &[0],
+        &[0xfd, 0, 0, 0],
+        &[0, 0xfd, 1, 0],
+        &[0xfe, 1, 0, 0, 2],
+        &[0, 0xfe, 0, 0, 0, 2],
+        &[0, 1, 42],
+        &[0, 1, 42, 1],
+        &[0, 0, 42],
+    ] {
+        let effect = payload(tail);
+        let typed = effect.decode(coinbase::CoinbaseBundle::read).unwrap_err();
+        let digest = effect.decode(coinbase::encoded_effects_digest).unwrap_err();
+        assert_eq!(typed.kind(), digest.kind(), "tail {tail:?}");
+    }
+
+    for count in [0, 1, 252, 253, 256] {
+        let mut tail = vec![0];
+        zcash_protocol::encoding::CompactSize::write(&mut tail, count).unwrap();
+        for code in 0..count {
+            tail.extend_from_slice(&[code as u8, 42]);
+        }
+        if count > 0 {
+            tail.extend_from_slice(&[7; 16]);
+        }
+        let effect = payload(&tail);
+        let typed = effect.decode(coinbase::CoinbaseBundle::read).unwrap();
+        let digest = effect.decode(coinbase::encoded_effects_digest).unwrap();
+        assert_eq!(digest, typed.effects_digest());
+        let mut encoded = Vec::new();
+        typed.write(&mut encoded).unwrap();
+        assert_eq!(encoded, effect.data);
+    }
+}
+
+#[test]
 fn coinbase_digest_precedes_accounting_validation() {
     let bytes = hex::decode(super::vectors::TEST_VECTORS[MINIMAL_COINBASE].tx).unwrap();
     let (header, deltas, mut effects, auth) = Envelope::read(&bytes[..]).unwrap().into_parts();

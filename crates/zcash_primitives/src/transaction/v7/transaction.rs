@@ -111,7 +111,7 @@ fn from_envelope(envelope: Envelope) -> io::Result<TransactionData<Authorized>> 
         .transpose()?;
 
     let coinbase_bundle = effect(BundleType::COINBASE)
-        .map(|effect| effect.decode(|r| CoinbaseBundle::read(r)))
+        .map(|effect| effect.decode(CoinbaseBundle::read))
         .transpose()?;
 
     let sapling_bundle = shielded_bundle(

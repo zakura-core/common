@@ -43,15 +43,7 @@ impl MinerPoll {
     /// Constructs a poll response from signals in strictly ascending order of
     /// `signal_code`, which implies there are at most 256.
     pub fn new(signals: Vec<MinerSignal>, poll_digest: [u8; 16]) -> Result<Self, CoinbaseError> {
-        if signals.is_empty() {
-            return Err(CoinbaseError::EmptyMinerPoll);
-        }
-        if signals
-            .windows(2)
-            .any(|pair| pair[1].signal_code <= pair[0].signal_code)
-        {
-            return Err(CoinbaseError::UnorderedMinerSignals);
-        }
+        validate_signal_codes(signals.iter().map(|s| s.signal_code))?;
         Ok(Self {
             signals,
             poll_digest,
@@ -132,15 +124,12 @@ impl CoinbaseBundle {
         coinbase_data: Vec<u8>,
         miner_poll: Option<MinerPoll>,
     ) -> Result<Self, CoinbaseError> {
-        if !(1..=super::MAX_V7_HEIGHT).contains(&u32::from(block_height)) {
-            return Err(CoinbaseError::BlockHeightOutOfRange);
-        }
-        if lockbox_value > block_subsidy {
-            return Err(CoinbaseError::LockboxExceedsSubsidy);
-        }
-        if coinbase_data.len() > MAX_COINBASE_DATA_LEN {
-            return Err(CoinbaseError::CoinbaseDataTooLong);
-        }
+        validate_fields(
+            block_height,
+            block_subsidy,
+            lockbox_value,
+            coinbase_data.len(),
+        )?;
         Ok(Self {
             block_height,
             block_subsidy,
@@ -176,21 +165,38 @@ impl CoinbaseBundle {
     }
 
     /// Reads and validates a typed coinbase bundle.
-    pub(crate) fn read<R: Read>(reader: R) -> io::Result<Self> {
+    pub(crate) fn read(reader: &mut &[u8]) -> io::Result<Self> {
         let fields = EncodedCoinbase::read(reader)?;
-        let miner_poll = fields
-            .poll_digest
-            .map(|digest| MinerPoll::new(fields.signals, digest))
-            .transpose()
-            .map_err(invalid)?;
-        Self::new(
-            fields.block_height.into(),
-            amount(fields.block_subsidy)?,
-            amount(fields.lockbox_value)?,
-            fields.coinbase_data,
-            miner_poll,
+        if fields.poll_digest.is_some() {
+            validate_signal_codes(fields.signals.iter().map(|s| s[0])).map_err(invalid)?;
+        }
+        let block_height = fields.block_height.into();
+        let block_subsidy = amount(fields.block_subsidy)?;
+        let lockbox_value = amount(fields.lockbox_value)?;
+        validate_fields(
+            block_height,
+            block_subsidy,
+            lockbox_value,
+            fields.coinbase_data.len(),
         )
-        .map_err(invalid)
+        .map_err(invalid)?;
+        Ok(Self {
+            block_height,
+            block_subsidy,
+            lockbox_value,
+            coinbase_data: fields.coinbase_data.to_vec(),
+            miner_poll: fields.poll_digest.map(|poll_digest| MinerPoll {
+                signals: fields
+                    .signals
+                    .iter()
+                    .map(|&[signal_code, level_of_support]| MinerSignal {
+                        signal_code,
+                        level_of_support,
+                    })
+                    .collect(),
+                poll_digest,
+            }),
+        })
     }
 
     /// Writes the coinbase effecting data.
@@ -220,29 +226,30 @@ impl CoinbaseBundle {
 }
 
 /// The fields needed to delimit a coinbase payload, before consensus checks.
-struct EncodedCoinbase {
+struct EncodedCoinbase<'a> {
     block_height: u32,
     block_subsidy: u64,
     lockbox_value: u64,
-    coinbase_data: Vec<u8>,
-    signals: Vec<MinerSignal>,
+    coinbase_data: &'a [u8],
+    signals: &'a [[u8; 2]],
     poll_digest: Option<[u8; 16]>,
 }
 
-impl EncodedCoinbase {
-    fn read<R: Read>(mut reader: R) -> io::Result<Self> {
+impl<'a> EncodedCoinbase<'a> {
+    fn read(reader: &mut &'a [u8]) -> io::Result<Self> {
         let block_height = reader.read_u32_le()?;
         let block_subsidy = reader.read_u64_le()?;
         let lockbox_value = reader.read_u64_le()?;
-        let coinbase_data = Vector::read_bytes(&mut reader)?;
-        let signals = Vector::read(&mut reader, |r| {
-            let mut signal = [0; 2];
-            r.read_exact(&mut signal)?;
-            Ok(MinerSignal {
-                signal_code: signal[0],
-                level_of_support: signal[1],
-            })
-        })?;
+        let data_len = CompactSize::read_t(&mut *reader)?;
+        let coinbase_data = reader
+            .split_off(..data_len)
+            .ok_or(io::ErrorKind::UnexpectedEof)?;
+        let count = CompactSize::read_t::<_, usize>(&mut *reader)?;
+        let signal_len = count.checked_mul(2).ok_or(io::ErrorKind::InvalidInput)?;
+        let signal_bytes = reader
+            .split_off(..signal_len)
+            .ok_or(io::ErrorKind::UnexpectedEof)?;
+        let (signals, _) = signal_bytes.as_chunks::<2>();
         let poll_digest = if signals.is_empty() {
             None
         } else {
@@ -268,6 +275,34 @@ pub(super) fn encoded_effects_digest(reader: &mut &[u8]) -> io::Result<Blake2bHa
     let mut h = hasher(COINBASE_PERSONALIZATION);
     h.write_all(&bytes[..bytes.len() - reader.len()])?;
     Ok(h.finalize())
+}
+
+fn validate_signal_codes(codes: impl ExactSizeIterator<Item = u8>) -> Result<(), CoinbaseError> {
+    if codes.len() == 0 {
+        return Err(CoinbaseError::EmptyMinerPoll);
+    }
+    if !codes.is_sorted_by(|a, b| a < b) {
+        return Err(CoinbaseError::UnorderedMinerSignals);
+    }
+    Ok(())
+}
+
+fn validate_fields(
+    block_height: BlockHeight,
+    block_subsidy: Zatoshis,
+    lockbox_value: Zatoshis,
+    data_len: usize,
+) -> Result<(), CoinbaseError> {
+    if !(1..=super::MAX_V7_HEIGHT).contains(&u32::from(block_height)) {
+        return Err(CoinbaseError::BlockHeightOutOfRange);
+    }
+    if lockbox_value > block_subsidy {
+        return Err(CoinbaseError::LockboxExceedsSubsidy);
+    }
+    if data_len > MAX_COINBASE_DATA_LEN {
+        return Err(CoinbaseError::CoinbaseDataTooLong);
+    }
+    Ok(())
 }
 
 fn amount(value: u64) -> io::Result<Zatoshis> {
