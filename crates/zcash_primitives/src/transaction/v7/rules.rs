@@ -39,9 +39,9 @@ pub enum BundleRuleError {
     DeltaWithoutBundle(BundleType),
     /// A bundle is registered for v7 but not active in the transaction's consensus
     /// branch, so typed data has no place for it. This library assumes that NU7.1 does
-    /// not activate the ZIP 233 bundle. Only decoding returns this error. Unlike the
-    /// other variants it is a bundle availability rule, which ZIP 248 leaves out of
-    /// parsing: [`Envelope`](super::Envelope) still reads such a transaction.
+    /// not activate the ZIP 233 bundle. Only decoding returns this error. It is a
+    /// bundle availability rule, which ZIP 248 leaves out of parsing:
+    /// [`Envelope`](super::Envelope) still reads such a transaction.
     InactiveBundle(BundleType),
     /// A coinbase transaction spends from the pool of this bundle type: it has
     /// transparent inputs, Sapling spends, or an Orchard or Ironwood bundle with spends
@@ -184,8 +184,8 @@ fn spent_pool<A: Authorization>(tx: &TransactionData<A>) -> Option<BundleType> {
     .find_map(|(pool, spends)| spends.then_some(pool))
 }
 
-/// A violation of a consensus rule that one v7 transaction decides by itself, found by
-/// [`TransactionData::check_v7_transaction_rules`].
+/// A violation of a ZIP 248 value or input and output rule that one v7 transaction
+/// decides by itself, found by [`TransactionData::check_v7_transaction_rules`].
 ///
 /// A transaction that breaks one of these rules is well-formed but invalid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -246,9 +246,9 @@ impl fmt::Display for TransactionRuleError {
 
 impl core::error::Error for TransactionRuleError {}
 
-/// Checks the ZIP 248 value rules that one v7 transaction decides by itself, beyond the
-/// bundle-local rules that every v7 transaction already satisfies. Transactions of
-/// earlier versions have no such rules here.
+/// Checks the ZIP 248 value and input and output rules that one v7 transaction decides
+/// by itself, beyond the bundle-local rules that every v7 transaction already satisfies.
+/// Transactions of earlier versions have no such rules here.
 ///
 /// These are the ZIP 248 cross-bundle rules that need neither the block nor the spent
 /// outputs, with the rules of the protocol specification's transaction consensus rules
@@ -285,8 +285,8 @@ pub(crate) fn check_transaction_local_rules<A: Authorization>(
                 return Err(TransactionRuleError::CoinbaseFeeNegative);
             }
             // ZIP 235: `NSMFeeContribution = floor(6 * TransactionFees / 10)`, in force
-            // from NU7, which precedes every branch that permits v7. The fee delta of a
-            // coinbase transaction is its block's `TransactionFees`.
+            // from NU7, whose rules NU7.1, the only branch that permits v7, inherits. The
+            // fee delta of a coinbase transaction is its block's `TransactionFees`.
             let fee_contribution = 6 * fee / 10;
             let expected = i128::from(coinbase.block_subsidy().into_u64())
                 - i128::from(coinbase.lockbox_value().into_u64())

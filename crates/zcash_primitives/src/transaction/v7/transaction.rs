@@ -4,9 +4,8 @@
 //! transaction it cannot represent: one with an unregistered pair, an entry in a map
 //! the registry forbids for that pair, a registered bundle that its consensus branch is
 //! assumed not to activate (the ZIP 233 bundle), a bundle without the authorizing data it
-//! needs, or
-//! a signature that does not use sighash variant 0. Such a transaction can still be
-//! parsed with [`Envelope::read`], and identified with [`Envelope::txid`].
+//! needs, or a signature that does not use sighash variant 0. Such a transaction can
+//! still be parsed with [`Envelope::read`], and identified with [`Envelope::txid`].
 //!
 //! Decoding also enforces the other ZIP 248 bundle-local rules: those on each bundle's own
 //! fields, such as the coinbase bundle's, and those [`TransactionData::from_parts_v7`]
