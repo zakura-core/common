@@ -863,7 +863,7 @@ pub struct PcztParts<P: consensus::Parameters> {
 /// Generates a [`Transaction`] from its inputs and outputs.
 pub struct Builder<P, U> {
     params: P,
-    tx_version: TxVersion,
+    proposed_version: Option<TxVersion>,
     consensus_branch_id: BranchId,
     build_config: BuildConfig,
     target_height: BlockHeight,
@@ -928,7 +928,26 @@ impl<P, U> Builder<P, U> {
     /// added to this builder (i.e. the transaction will carry an Ironwood bundle).
     fn ironwood_in_use(&self) -> bool {
         self.ironwood_builder.as_ref().is_some_and(|b| {
-            !b.spends().is_empty() || !b.outputs().is_empty() || !b.changes().is_empty()
+            matches!(
+                b.bundle_type(),
+                orchard::builder::BundleType::Transactional {
+                    bundle_required: true,
+                    ..
+                }
+            ) || !b.spends().is_empty()
+                || !b.outputs().is_empty()
+                || !b.changes().is_empty()
+        })
+    }
+
+    /// At NU7.1 a wallet can send v5 unless the transaction needs Ironwood.
+    fn transaction_version(&self) -> TxVersion {
+        self.proposed_version.unwrap_or_else(|| {
+            if self.consensus_branch_id == BranchId::Nu7_1 && !self.ironwood_in_use() {
+                TxVersion::V5
+            } else {
+                TxVersion::suggested_for_branch(self.consensus_branch_id)
+            }
         })
     }
 
@@ -993,7 +1012,7 @@ impl<P, U> Builder<P, U> {
     /// added after this call.
     pub fn propose_version<FE>(&mut self, version: TxVersion) -> Result<(), Error<FE>> {
         self.check_version_compatibility(version)?;
-        self.tx_version = version;
+        self.proposed_version = Some(version);
         Ok(())
     }
 }
@@ -1053,7 +1072,7 @@ impl<P: consensus::Parameters> Builder<P, ()> {
 
         Builder {
             params,
-            tx_version,
+            proposed_version: None,
             consensus_branch_id,
             build_config,
             target_height,
@@ -1080,7 +1099,7 @@ impl<P: consensus::Parameters> Builder<P, ()> {
     ) -> Builder<P, Sender<Progress>> {
         Builder {
             params: self.params,
-            tx_version: self.tx_version,
+            proposed_version: self.proposed_version,
             consensus_branch_id: self.consensus_branch_id,
             build_config: self.build_config,
             target_height: self.target_height,
@@ -1590,7 +1609,8 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         SP: SpendProver,
         OP: OutputProver,
     {
-        self.check_version_compatibility::<FE>(self.tx_version)?;
+        let version = self.transaction_version();
+        self.check_version_compatibility::<FE>(version)?;
         self.check_coinbase_expiry_height::<FE>()?;
         self.check_shielded_budget()
             .map_err(|e| Error::Fee(FeeError::Bundle(e)))?;
@@ -1677,7 +1697,7 @@ impl<P: consensus::Parameters, U: sapling::builder::ProverProgress> Builder<P, U
         };
 
         let unauthed_tx: TransactionData<A> = TransactionData {
-            version: self.tx_version,
+            version,
             consensus_branch_id: self.consensus_branch_id,
             lock_time: 0,
             expiry_height: self.expiry_height,
@@ -1839,7 +1859,8 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
         fee_rule: &FR,
     ) -> Result<PcztResult<P>, Error<FR::Error>> {
         let fee = self.get_fee(fee_rule).map_err(Error::Fee)?;
-        self.check_version_compatibility::<FR::Error>(self.tx_version)?;
+        let version = self.transaction_version();
+        self.check_version_compatibility::<FR::Error>(version)?;
         self.check_coinbase_expiry_height::<FR::Error>()?;
 
         //
@@ -1890,7 +1911,7 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
         // The Ironwood bundle is only carried by V6 transactions; for any other version it is
         // left empty (and `check_version_compatibility` above rejects an in-use Ironwood
         // builder paired with a non-V6 version).
-        let (ironwood_bundle, ironwood_meta) = if self.tx_version.has_ironwood() {
+        let (ironwood_bundle, ironwood_meta) = if version.has_ironwood() {
             match self
                 .ironwood_builder
                 .map(|builder| {
@@ -1910,7 +1931,7 @@ impl<P: consensus::Parameters, U> Builder<P, U> {
         Ok(PcztResult {
             pczt_parts: PcztParts {
                 params: self.params,
-                version: self.tx_version,
+                version,
                 consensus_branch_id: self.consensus_branch_id,
                 lock_time: 0,
                 expiry_height: self.expiry_height,
@@ -2416,7 +2437,10 @@ mod tests {
             },
         );
 
-        assert_eq!(builder.tx_version, crate::transaction::TxVersion::V6);
+        assert_eq!(
+            builder.transaction_version(),
+            crate::transaction::TxVersion::V6
+        );
         assert_eq!(
             builder.orchard_bundle_version,
             Some(orchard::bundle::BundleVersion::orchard_v3())
@@ -2539,62 +2563,70 @@ mod tests {
 
     #[test]
     #[cfg(all(feature = "circuits", feature = "transparent-inputs"))]
-    fn build_for_pczt_preserves_explicit_v6_without_ironwood() {
+    fn nu7_1_transparent_pczt_uses_v5_unless_v6_is_requested() {
         use ::transparent::keys::NonHardenedChildIndex;
 
-        let mut builder = Builder::new(
-            nu6_3_test_network(),
-            10u32.into(),
-            BuildConfig::Standard {
-                sapling_anchor: None,
-                orchard_anchor: None,
-                ironwood_anchor: None,
-                orchard_padding: BundlePadding::DEFAULT,
-                ironwood_padding: BundlePadding::DEFAULT,
-            },
-        );
-        builder
-            .propose_version::<Infallible>(TxVersion::V6)
-            .unwrap();
+        let mut network = nu7_test_network();
+        network.nu7_1 = Some(12u32.into());
+        for explicit_version in [None, Some(TxVersion::V6)] {
+            let mut builder = Builder::new(
+                network,
+                12u32.into(),
+                BuildConfig::Standard {
+                    sapling_anchor: None,
+                    orchard_anchor: None,
+                    ironwood_anchor: None,
+                    orchard_padding: BundlePadding::DEFAULT,
+                    ironwood_padding: BundlePadding::DEFAULT,
+                },
+            );
+            if let Some(version) = explicit_version {
+                builder.propose_version::<Infallible>(version).unwrap();
+            }
 
-        let mut transparent_signing_set = TransparentSigningSet::new();
-        let tsk = AccountPrivKey::from_seed(&TEST_NETWORK, &[0u8; 32], AccountId::ZERO).unwrap();
-        let sk = tsk
-            .derive_external_secret_key(NonHardenedChildIndex::ZERO)
-            .unwrap();
-        let pubkey = transparent_signing_set.add_key(sk);
-        let prev_coin = TxOut::new(
-            Zatoshis::const_from_u64(50000),
-            tsk.to_account_pubkey()
-                .derive_external_ivk()
-                .unwrap()
-                .derive_address(NonHardenedChildIndex::ZERO)
-                .unwrap()
-                .script()
-                .into(),
-        );
+            let mut transparent_signing_set = TransparentSigningSet::new();
+            let tsk =
+                AccountPrivKey::from_seed(&TEST_NETWORK, &[0u8; 32], AccountId::ZERO).unwrap();
+            let sk = tsk
+                .derive_external_secret_key(NonHardenedChildIndex::ZERO)
+                .unwrap();
+            let pubkey = transparent_signing_set.add_key(sk);
+            let prev_coin = TxOut::new(
+                Zatoshis::const_from_u64(50000),
+                tsk.to_account_pubkey()
+                    .derive_external_ivk()
+                    .unwrap()
+                    .derive_address(NonHardenedChildIndex::ZERO)
+                    .unwrap()
+                    .script()
+                    .into(),
+            );
 
-        builder
-            .add_transparent_p2pkh_input(pubkey, OutPoint::fake(), prev_coin)
-            .unwrap();
-        builder
-            .add_transparent_output(
-                &TransparentAddress::PublicKeyHash([0; 20]),
-                Zatoshis::const_from_u64(40000),
-            )
-            .unwrap();
+            builder
+                .add_transparent_p2pkh_input(pubkey, OutPoint::fake(), prev_coin)
+                .unwrap();
+            builder
+                .add_transparent_output(
+                    &TransparentAddress::PublicKeyHash([0; 20]),
+                    Zatoshis::const_from_u64(40000),
+                )
+                .unwrap();
 
-        let res = builder
-            .build_for_pczt(
-                thread_rng(),
-                &crate::transaction::fees::zip317::FeeRule::standard(),
-            )
-            .unwrap();
-        assert_eq!(res.pczt_parts.version, TxVersion::V6);
-        assert_eq!(
-            res.pczt_parts.consensus_branch_id,
-            zcash_protocol::consensus::BranchId::Nu6_3
-        );
+            let res = builder
+                .build_for_pczt(
+                    thread_rng(),
+                    &crate::transaction::fees::zip317::FeeRule::standard(),
+                )
+                .unwrap();
+            assert_eq!(
+                res.pczt_parts.version,
+                explicit_version.unwrap_or(TxVersion::V5)
+            );
+            assert_eq!(
+                res.pczt_parts.consensus_branch_id,
+                zcash_protocol::consensus::BranchId::Nu7_1
+            );
+        }
     }
 
     #[test]
@@ -2662,6 +2694,7 @@ mod tests {
             )
             .unwrap();
 
+        assert_eq!(builder.transaction_version(), TxVersion::V6);
         // The Ironwood output is accepted; only the missing funds stop the build.
         assert_matches!(
             builder.build_for_pczt(
@@ -3059,7 +3092,7 @@ mod tests {
         let consensus_branch_id = BranchId::for_height(&TEST_NETWORK, sapling_activation_height);
         let mut builder = builder::Builder {
             params: TEST_NETWORK,
-            tx_version: TxVersion::suggested_for_branch(consensus_branch_id),
+            proposed_version: None,
             consensus_branch_id,
             build_config: BuildConfig::Standard {
                 sapling_anchor: Some(sapling::Anchor::empty_tree()),
