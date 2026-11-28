@@ -510,13 +510,14 @@ impl<A: Authorization> TransactionData<A> {
         self.ironwood_bundle.as_ref()
     }
 
-    /// Checks the ZIP 248 value and input and output rules that a v7 transaction decides
-    /// by itself: the sign of the fee, that the value pool deltas sum to zero, that the
-    /// transaction has an input and an output, that the Orchard pool balance is not
-    /// negative, that the transparent delta is consistent with the transparent outputs,
-    /// and that a coinbase transaction's expiry height is its block height and its
-    /// coinbase delta is the block subsidy less the lockbox deposit and the ZIP 235 fee
-    /// contribution.
+    /// Checks the consensus rules that a v7 transaction decides from its header, its value
+    /// pool deltas, its coinbase bundle, and the counts and flags of its bundles: the sign
+    /// of the fee, that the value pool deltas sum to zero, that the transaction has an
+    /// input and an output, that an Orchard or Ironwood bundle has spends or outputs
+    /// enabled, that the Orchard pool balance is not negative, that the transparent delta
+    /// is consistent with the transparent outputs, and that a coinbase transaction has no
+    /// Orchard actions, expires at its block height, and has a coinbase delta equal to
+    /// the block subsidy less the lockbox deposit and the ZIP 235 fee contribution.
     ///
     /// It does not verify proofs or signatures, or any rule on the contents of a shielded
     /// bundle. Decoding does not check these rules, because a transaction that breaks one
