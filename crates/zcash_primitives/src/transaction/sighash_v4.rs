@@ -128,6 +128,18 @@ fn sapling_outputs_hash(outputs: &[OutputDescription<GrothProofBytes>]) -> Blake
         .hash(&data)
 }
 
+/// Computes the signature digest of a transaction before v5, as specified in
+/// [ZIP 243](https://zips.z.cash/zip-0243) for v4 and in
+/// [ZIP 143](https://zips.z.cash/zip-0143) for v3.
+///
+/// [`signature_hash`](super::sighash::signature_hash) returns an error for a
+/// [`SignableInput::V7Shielded`] signature instead of panicking.
+///
+/// # Panics
+///
+/// Panics if the transaction predates Overwinter, if `signable_input` is a transparent
+/// input of a transaction without a transparent bundle, or if it is a
+/// [`SignableInput::V7Shielded`] signature, which exists only in v7 transactions.
 pub fn v4_signature_hash<
     SA: sapling::bundle::Authorization<SpendProof = GrothProofBytes, OutputProof = GrothProofBytes>,
     A: Authorization<SaplingAuth = SA>,
@@ -231,6 +243,9 @@ pub fn v4_signature_hash<
 
         match signable_input {
             SignableInput::Shielded => (),
+            SignableInput::V7Shielded { .. } => {
+                panic!("v7 shielded signatures exist only in v7 transactions")
+            }
             SignableInput::Transparent(input) => {
                 if let Some(bundle) = tx.transparent_bundle.as_ref() {
                     let mut data = vec![];

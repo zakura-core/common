@@ -128,8 +128,11 @@ pub(super) fn transparent_sig_digest<A: TransparentAuthorizingContext>(
     }
 }
 
-/// Implements the [Signature Digest section of ZIP 244](https://zips.z.cash/zip-0244#signature-digest)
-pub fn v5_signature_hash<
+/// Implements the [Signature Digest section of ZIP 244](https://zips.z.cash/zip-0244#signature-digest).
+///
+/// [`signature_hash`](super::sighash::signature_hash) is the public entry point; it
+/// rejects the signers of other transaction versions before calling this.
+pub(crate) fn v5_signature_hash<
     TA: TransparentAuthorizingContext,
     A: Authorization<TransparentAuth = TA>,
 >(

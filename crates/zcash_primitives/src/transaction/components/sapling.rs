@@ -21,7 +21,7 @@ use zcash_protocol::{
 };
 
 use super::GROTH_PROOF_SIZE;
-use crate::transaction::Transaction;
+use crate::transaction::{Transaction, txid, v7};
 
 /// Returns the enforcement policy for ZIP 212 at the given height.
 pub fn zip212_enforcement(params: &impl Parameters, height: BlockHeight) -> Zip212Enforcement {
@@ -287,7 +287,28 @@ fn write_output_v5_without_proof<W: Write>(
     writer.write_all(output.out_ciphertext())
 }
 
-fn read_output_v5<R: Read>(mut reader: &mut R) -> io::Result<OutputDescriptionV5> {
+fn read_output_v5<R: Read>(reader: &mut R) -> io::Result<OutputDescriptionV5> {
+    let (cv, cmu, ephemeral_key, enc_ciphertext, out_ciphertext) = read_output_fields(reader)?;
+    Ok(OutputDescriptionV5::from_parts(
+        cv,
+        cmu,
+        ephemeral_key,
+        enc_ciphertext,
+        out_ciphertext,
+    ))
+}
+
+/// Reads the fields of an Output description that v5 and v7 encode without its proof.
+#[allow(clippy::type_complexity)]
+fn read_output_fields<R: Read>(
+    mut reader: R,
+) -> io::Result<(
+    ValueCommitment,
+    ExtractedNoteCommitment,
+    EphemeralKeyBytes,
+    [u8; ENC_CIPHERTEXT_SIZE],
+    [u8; OUT_CIPHERTEXT_SIZE],
+)> {
     let cv = read_value_commitment(&mut reader)?;
     let cmu = read_cmu(&mut reader)?;
 
@@ -297,18 +318,12 @@ fn read_output_v5<R: Read>(mut reader: &mut R) -> io::Result<OutputDescriptionV5
     let mut ephemeral_key = EphemeralKeyBytes([0u8; 32]);
     reader.read_exact(&mut ephemeral_key.0)?;
 
-    let mut enc_ciphertext = [0u8; 580];
-    let mut out_ciphertext = [0u8; 80];
+    let mut enc_ciphertext = [0u8; ENC_CIPHERTEXT_SIZE];
+    let mut out_ciphertext = [0u8; OUT_CIPHERTEXT_SIZE];
     reader.read_exact(&mut enc_ciphertext)?;
     reader.read_exact(&mut out_ciphertext)?;
 
-    Ok(OutputDescriptionV5::from_parts(
-        cv,
-        cmu,
-        ephemeral_key,
-        enc_ciphertext,
-        out_ciphertext,
-    ))
+    Ok((cv, cmu, ephemeral_key, enc_ciphertext, out_ciphertext))
 }
 
 /// Reads the Sapling components of a v4 transaction.
@@ -498,12 +513,208 @@ pub(crate) fn write_v5_bundle<W: Write>(
     Ok(())
 }
 
+/// The effecting data of a v7 Sapling bundle ([ZIP 248]): its Spend descriptions
+/// without anchors, proofs or signatures, and its Output descriptions without proofs.
+///
+/// [ZIP 248]: https://zips.z.cash/zip-0248
+pub(crate) struct V7Effects {
+    spends: Vec<V7Spend>,
+    outputs: Vec<OutputDescription<()>>,
+}
+
+/// A v7 `SaplingSpendEffecting`.
+struct V7Spend {
+    cv: ValueCommitment,
+    nullifier: Nullifier,
+    rk: redjubjub::VerificationKey<SpendAuth>,
+}
+
+/// The authorizing data of a v7 Sapling bundle, with each `sighashInfo` of any variant.
+pub(crate) struct V7Auth {
+    /// Present exactly when the bundle has spends.
+    anchor: Option<jubjub::Base>,
+    spend_proofs: Vec<GrothProofBytes>,
+    spend_auth_sigs: Vec<v7::sighash_info::Signature>,
+    output_proofs: Vec<GrothProofBytes>,
+    binding_sig: v7::sighash_info::Signature,
+}
+
+impl V7Effects {
+    /// Reads the effecting data, which must have at least one Spend or Output.
+    pub(crate) fn read<R: Read>(mut reader: R) -> io::Result<Self> {
+        let spends = Vector::read(&mut reader, |r| {
+            Ok(V7Spend {
+                cv: read_value_commitment(&mut *r)?,
+                nullifier: read_nullifier(&mut *r)?,
+                rk: read_rk(r)?,
+            })
+        })?;
+        let outputs = Vector::read(&mut reader, |r| {
+            let (cv, cmu, ephemeral_key, enc_ciphertext, out_ciphertext) = read_output_fields(r)?;
+            Ok(OutputDescription::from_parts(
+                cv,
+                cmu,
+                ephemeral_key,
+                enc_ciphertext,
+                out_ciphertext,
+                (),
+            ))
+        })?;
+        if spends.is_empty() && outputs.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "an empty v7 Sapling bundle must be omitted",
+            ));
+        }
+        Ok(Self { spends, outputs })
+    }
+
+    /// T.3.2 `sapling_effects_digest`.
+    pub(crate) fn effects_digest(&self) -> blake2b_simd::Hash {
+        txid::sapling_v7_effects_digest(
+            self.spends.iter().map(|spend| txid::SaplingSpendEffects {
+                cv: &spend.cv,
+                nullifier: &spend.nullifier,
+                rk: &spend.rk,
+                anchor: None,
+            }),
+            &self.outputs,
+        )
+    }
+
+    /// Reads the authorizing data that completes these effects, whose counts it takes from
+    /// them.
+    pub(crate) fn read_auth<R: Read>(&self, mut reader: R) -> io::Result<V7Auth> {
+        let n_spends = self.spends.len();
+        let anchor = if n_spends > 0 {
+            Some(read_base(&mut reader, "anchor")?)
+        } else {
+            None
+        };
+        Ok(V7Auth {
+            anchor,
+            spend_proofs: Array::read(&mut reader, n_spends, |r| read_zkproof(r))?,
+            spend_auth_sigs: Array::read(&mut reader, n_spends, |r| {
+                v7::sighash_info::Signature::read(r)
+            })?,
+            output_proofs: Array::read(&mut reader, self.outputs.len(), |r| read_zkproof(r))?,
+            binding_sig: v7::sighash_info::Signature::read(&mut reader)?,
+        })
+    }
+
+    /// Assembles the bundle from these effects, their authorizing data, whose signatures
+    /// must use sighash variant 0, and `value_balance`, its entry in `mValuePoolDeltas`.
+    pub(crate) fn into_bundle(
+        self,
+        auth: V7Auth,
+        value_balance: ZatBalance,
+    ) -> io::Result<Bundle<Authorized, ZatBalance>> {
+        let spend_auth_sigs = auth
+            .spend_auth_sigs
+            .into_iter()
+            .map(|sig| sig.into_v0().map(redjubjub::Signature::from))
+            .collect::<io::Result<Vec<_>>>()?;
+        let binding_sig = redjubjub::Signature::from(auth.binding_sig.into_v0()?);
+
+        let shielded_spends = self
+            .spends
+            .into_iter()
+            .zip(auth.spend_proofs.into_iter().zip(spend_auth_sigs))
+            .map(|(spend, (zkproof, spend_auth_sig))| {
+                SpendDescription::from_parts(
+                    spend.cv,
+                    auth.anchor
+                        .expect("an anchor was read because there are spends"),
+                    spend.nullifier,
+                    spend.rk,
+                    zkproof,
+                    spend_auth_sig,
+                )
+            })
+            .collect();
+        let shielded_outputs = self
+            .outputs
+            .into_iter()
+            .zip(auth.output_proofs)
+            .map(|(output, zkproof)| {
+                OutputDescription::from_parts(
+                    output.cv().clone(),
+                    *output.cmu(),
+                    output.ephemeral_key().clone(),
+                    *output.enc_ciphertext(),
+                    *output.out_ciphertext(),
+                    zkproof,
+                )
+            })
+            .collect();
+
+        Ok(Bundle::from_parts(
+            shielded_spends,
+            shielded_outputs,
+            value_balance,
+            Authorized { binding_sig },
+        )
+        .expect("the effecting data has at least one Spend or Output"))
+    }
+}
+
+impl V7Auth {
+    /// A.1.2 `sapling_auth_digest`.
+    pub(crate) fn auth_digest(&self) -> blake2b_simd::Hash {
+        fn field(sig: &v7::sighash_info::Signature) -> (&[u8], [u8; 64]) {
+            (sig.sighash_info.field_encoding(), sig.signature)
+        }
+        txid::sapling_v7_auth_digest(
+            self.anchor.as_ref(),
+            &self.spend_proofs,
+            self.spend_auth_sigs.iter().map(field),
+            &self.output_proofs,
+            field(&self.binding_sig),
+        )
+    }
+}
+
+/// Writes the effecting data of a v7 Sapling bundle.
+pub(crate) fn write_v7_effects<W: Write>(
+    mut writer: W,
+    bundle: &Bundle<Authorized, ZatBalance>,
+) -> io::Result<()> {
+    Vector::write(&mut writer, bundle.shielded_spends(), |w, e| {
+        write_spend_v5_without_witness_data(w, e)
+    })?;
+    Vector::write(&mut writer, bundle.shielded_outputs(), |w, e| {
+        write_output_v5_without_proof(w, e)
+    })
+}
+
+/// Writes the authorizing data of a v7 Sapling bundle.
+pub(crate) fn write_v7_auth<W: Write>(
+    mut writer: W,
+    bundle: &Bundle<Authorized, ZatBalance>,
+) -> io::Result<()> {
+    if let Some(spend) = bundle.shielded_spends().first() {
+        writer.write_all(spend.anchor().to_repr().as_ref())?;
+    }
+    for spend in bundle.shielded_spends() {
+        writer.write_all(&spend.zkproof()[..])?;
+    }
+    for spend in bundle.shielded_spends() {
+        v7::sighash_info::write_v0(&mut writer)?;
+        writer.write_all(&<[u8; 64]>::from(*spend.spend_auth_sig()))?;
+    }
+    for output in bundle.shielded_outputs() {
+        writer.write_all(&output.zkproof()[..])?;
+    }
+    v7::sighash_info::write_v0(&mut writer)?;
+    writer.write_all(&<[u8; 64]>::from(bundle.authorization().binding_sig))
+}
+
 #[cfg(any(test, feature = "test-dependencies"))]
 pub mod testing {
     use proptest::prelude::*;
 
     use crate::transaction::TxVersion;
-    use ::sapling::bundle::{Authorized, Bundle, testing as t_sap};
+    use ::sapling::bundle::{Authorized, Bundle, SpendDescription, testing as t_sap};
     use zcash_protocol::value::{ZatBalance, testing::arb_zat_balance};
 
     prop_compose! {
@@ -516,10 +727,48 @@ pub mod testing {
         }
     }
 
+    pub(crate) fn spend_with_anchor(
+        spend: &SpendDescription<Authorized>,
+        anchor: jubjub::Base,
+    ) -> SpendDescription<Authorized> {
+        SpendDescription::from_parts(
+            spend.cv().clone(),
+            anchor,
+            *spend.nullifier(),
+            *spend.rk(),
+            *spend.zkproof(),
+            *spend.spend_auth_sig(),
+        )
+    }
+
     pub fn arb_bundle_for_version(
         v: TxVersion,
     ) -> impl Strategy<Value = Option<Bundle<Authorized, ZatBalance>>> {
-        if v.has_sapling() {
+        if v == TxVersion::V7 {
+            // The v7 wire format has one anchor for every spend in the bundle.
+            arb_bundle()
+                .prop_map(|bundle| {
+                    bundle.map(|bundle| {
+                        let Some((first, rest)) = bundle.shielded_spends().split_first() else {
+                            return bundle;
+                        };
+                        let spends = core::iter::once(first.clone())
+                            .chain(
+                                rest.iter()
+                                    .map(|spend| spend_with_anchor(spend, *first.anchor())),
+                            )
+                            .collect();
+                        Bundle::from_parts(
+                            spends,
+                            bundle.shielded_outputs().to_vec(),
+                            *bundle.value_balance(),
+                            *bundle.authorization(),
+                        )
+                        .expect("the bundle has a spend")
+                    })
+                })
+                .boxed()
+        } else if v.has_sapling() {
             Strategy::boxed(arb_bundle())
         } else {
             Strategy::boxed(Just(None))

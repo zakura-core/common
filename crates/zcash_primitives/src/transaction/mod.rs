@@ -4,8 +4,9 @@ pub mod components;
 pub mod fees;
 pub mod sighash;
 pub mod sighash_v4;
-pub mod sighash_v5;
-pub mod sighash_v6;
+mod sighash_v5;
+mod sighash_v6;
+mod sighash_v7;
 
 pub mod txid;
 pub mod v7;
@@ -14,6 +15,7 @@ pub mod v7;
 pub mod tests;
 
 use crate::encoding::{ReadBytesExt, WriteBytesExt};
+use alloc::vec::Vec;
 use blake2b_simd::Hash as Blake2bHash;
 use core::convert::TryFrom;
 use core::fmt::Debug;
@@ -44,7 +46,9 @@ use zcash_protocol::constants::{
     V5_VERSION_GROUP_ID,
 };
 
-use zcash_protocol::constants::{V6_TX_VERSION, V6_VERSION_GROUP_ID};
+use zcash_protocol::constants::{
+    V6_TX_VERSION, V6_VERSION_GROUP_ID, V7_TX_VERSION, V7_VERSION_GROUP_ID,
+};
 
 pub use zcash_protocol::TxId;
 
@@ -75,6 +79,10 @@ pub enum TxVersion {
     V5,
     /// Transaction version 6, specified in [ZIP 229](https://zips.z.cash/zip-0229).
     V6,
+    /// Transaction version 7, the extensible transaction format specified in
+    /// [ZIP 248](https://zips.z.cash/zip-0248). Its version group ID is a placeholder; see
+    /// [`zcash_protocol::constants::V7_VERSION_GROUP_ID`].
+    V7,
 }
 
 impl TxVersion {
@@ -89,6 +97,7 @@ impl TxVersion {
                 (V4_TX_VERSION, V4_VERSION_GROUP_ID) => Ok(TxVersion::V4),
                 (V5_TX_VERSION, V5_VERSION_GROUP_ID) => Ok(TxVersion::V5),
                 (V6_TX_VERSION, V6_VERSION_GROUP_ID) => Ok(TxVersion::V6),
+                (V7_TX_VERSION, V7_VERSION_GROUP_ID) => Ok(TxVersion::V7),
                 _ => Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "Unknown transaction format",
@@ -118,6 +127,7 @@ impl TxVersion {
                 TxVersion::V4 => V4_TX_VERSION,
                 TxVersion::V5 => V5_TX_VERSION,
                 TxVersion::V6 => V6_TX_VERSION,
+                TxVersion::V7 => V7_TX_VERSION,
             }
     }
 
@@ -128,6 +138,7 @@ impl TxVersion {
             TxVersion::V4 => V4_VERSION_GROUP_ID,
             TxVersion::V5 => V5_VERSION_GROUP_ID,
             TxVersion::V6 => V6_VERSION_GROUP_ID,
+            TxVersion::V7 => V7_VERSION_GROUP_ID,
         }
     }
 
@@ -144,8 +155,7 @@ impl TxVersion {
         match self {
             TxVersion::Sprout(v) => *v >= 2u32,
             TxVersion::V3 | TxVersion::V4 => true,
-            TxVersion::V5 => false,
-            TxVersion::V6 => false,
+            TxVersion::V5 | TxVersion::V6 | TxVersion::V7 => false,
         }
     }
 
@@ -157,9 +167,7 @@ impl TxVersion {
     pub fn has_sapling(&self) -> bool {
         match self {
             TxVersion::Sprout(_) | TxVersion::V3 => false,
-            TxVersion::V4 => true,
-            TxVersion::V5 => true,
-            TxVersion::V6 => true,
+            TxVersion::V4 | TxVersion::V5 | TxVersion::V6 | TxVersion::V7 => true,
         }
     }
 
@@ -167,8 +175,7 @@ impl TxVersion {
     pub fn has_orchard(&self) -> bool {
         match self {
             TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 => false,
-            TxVersion::V5 => true,
-            TxVersion::V6 => true,
+            TxVersion::V5 | TxVersion::V6 | TxVersion::V7 => true,
         }
     }
 
@@ -176,11 +183,16 @@ impl TxVersion {
     pub fn has_ironwood(&self) -> bool {
         match self {
             TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 | TxVersion::V5 => false,
-            TxVersion::V6 => true,
+            TxVersion::V6 | TxVersion::V7 => true,
         }
     }
 
     /// Suggests the transaction version that should be used in the given Zcash epoch.
+    ///
+    /// This is the oldest format that the epoch accepts and that supports every pool active
+    /// in it. In particular it never suggests v7: ZIP 248 asks wallets to use v7 only for
+    /// transactions that need a feature no older valid format supports, so that more
+    /// receivers can parse them.
     pub fn suggested_for_branch(consensus_branch_id: BranchId) -> Self {
         match consensus_branch_id {
             BranchId::Sprout => TxVersion::Sprout(2),
@@ -223,6 +235,11 @@ impl TxVersion {
                 | Nu6_1 | Nu6_2 => false,
                 Nu6_3 => true,       // Ironwood / NU6.3
                 Nu7 | Nu7_1 => true, // later upgrades keep v6
+            },
+            TxVersion::V7 => match consensus_branch_id {
+                Sprout | Overwinter | Sapling | Blossom | Heartwood | Canopy | Nu5 | Nu6
+                | Nu6_1 | Nu6_2 | Nu6_3 | Nu7 => false,
+                Nu7_1 => true, // ZIP 248
             },
         }
     }
@@ -306,6 +323,8 @@ pub struct TransactionData<A: Authorization> {
     sapling_bundle: Option<sapling::Bundle<A::SaplingAuth, ZatBalance>>,
     orchard_bundle: Option<orchard::bundle::Bundle<A::OrchardAuth, ZatBalance>>,
     ironwood_bundle: Option<orchard::bundle::Bundle<A::OrchardAuth, ZatBalance>>,
+    /// The parts only a v7 transaction has; `Some` exactly when `version` is v7.
+    v7: Option<v7::V7Fields>,
 }
 
 impl Clone for TransactionData<Authorized> {
@@ -320,6 +339,7 @@ impl Clone for TransactionData<Authorized> {
             sapling_bundle: self.sapling_bundle.clone(),
             orchard_bundle: self.orchard_bundle.clone(),
             ironwood_bundle: self.ironwood_bundle.clone(),
+            v7: self.v7.clone(),
         }
     }
 }
@@ -338,6 +358,11 @@ impl Clone for Transaction {
 
 impl<A: Authorization> TransactionData<A> {
     /// Constructs a `TransactionData` from its constituent parts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `version` is v7, whose transactions have parts this constructor does not
+    /// take: use [`TransactionData::from_parts_v7`].
     #[allow(clippy::too_many_arguments)]
     pub fn from_parts(
         version: TxVersion,
@@ -349,6 +374,10 @@ impl<A: Authorization> TransactionData<A> {
         sapling_bundle: Option<sapling::Bundle<A::SaplingAuth, ZatBalance>>,
         orchard_bundle: Option<orchard::Bundle<A::OrchardAuth, ZatBalance>>,
     ) -> Self {
+        assert!(
+            version != TxVersion::V7,
+            "v7 transaction data is constructed with from_parts_v7"
+        );
         TransactionData {
             version,
             consensus_branch_id,
@@ -359,6 +388,7 @@ impl<A: Authorization> TransactionData<A> {
             sapling_bundle,
             orchard_bundle,
             ironwood_bundle: None,
+            v7: None,
         }
     }
 
@@ -394,7 +424,52 @@ impl<A: Authorization> TransactionData<A> {
             sapling_bundle,
             orchard_bundle,
             ironwood_bundle,
+            v7: None,
         }
+    }
+
+    /// Constructs a v7 [`TransactionData`] ([ZIP 248]) from its constituent parts.
+    ///
+    /// The Sapling, Orchard and Ironwood bundles carry their balancing values as their
+    /// value balances; `fields` carries every other value pool delta and the coinbase
+    /// bundle. The Orchard and Ironwood bundles must be constructed for their own pools,
+    /// as for [`TransactionData::from_parts_v6`]. A transparent bundle with neither inputs
+    /// nor outputs is dropped, since v7 encodes it by omitting it.
+    ///
+    /// Returns an error if v7 is unavailable in the consensus branch, the expiry height exceeds
+    /// 499,999,999, or the parts
+    /// violate a ZIP 248 bundle-local rule: a transparent or coinbase value pool delta
+    /// without its bundle, a coinbase transaction that spends, Sapling spends with
+    /// different anchors, or an Orchard or Ironwood bundle with the wrong version for this
+    /// consensus branch. The rules that relate the values of the bundles to each other or to the
+    /// chain, such as the balance of the value pool deltas, are left to full validators;
+    /// [`TransactionData::check_v7_transaction_rules`] checks those that need only the
+    /// transaction.
+    ///
+    /// [ZIP 248]: https://zips.z.cash/zip-0248
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts_v7(
+        consensus_branch_id: BranchId,
+        lock_time: u32,
+        expiry_height: BlockHeight,
+        transparent_bundle: Option<transparent::Bundle<A::TransparentAuth>>,
+        sapling_bundle: Option<sapling::Bundle<A::SaplingAuth, ZatBalance>>,
+        orchard_bundle: Option<orchard::Bundle<A::OrchardAuth, ZatBalance>>,
+        ironwood_bundle: Option<orchard::Bundle<A::OrchardAuth, ZatBalance>>,
+        fields: v7::V7Fields,
+    ) -> Result<Self, v7::BundleRuleError> {
+        v7::conform(TransactionData {
+            version: TxVersion::V7,
+            consensus_branch_id,
+            lock_time,
+            expiry_height,
+            transparent_bundle,
+            sprout_bundle: None,
+            sapling_bundle,
+            orchard_bundle,
+            ironwood_bundle,
+            v7: Some(fields),
+        })
     }
 
     /// Returns the transaction version.
@@ -435,14 +510,96 @@ impl<A: Authorization> TransactionData<A> {
         self.ironwood_bundle.as_ref()
     }
 
+    /// Checks these consensus rules, each of which a v7 transaction decides by itself:
+    /// the sign of the fee, that the value pool deltas sum to zero, that the transaction
+    /// has an input and an output, that an Orchard or Ironwood bundle has spends or
+    /// outputs enabled, that the Orchard pool balance is not negative, that no transparent
+    /// input has a null previous output, that the transparent delta is consistent with
+    /// the transparent outputs, and that a coinbase transaction has no Orchard actions,
+    /// expires at its block height, and has a coinbase delta equal to the block subsidy
+    /// less the lockbox deposit and the ZIP 235 fee contribution.
+    ///
+    /// It does not verify proofs or signatures, or any rule on the contents of a shielded
+    /// bundle, and it does not check the limit of 65,535 Sapling spends, Sapling outputs,
+    /// and Orchard or Ironwood actions, a previous output or nullifier that the
+    /// transaction repeats, or the total value of the transparent outputs of a
+    /// transaction with transparent inputs. Decoding does not check these rules, because a
+    /// transaction that breaks one is well-formed. Full validators call this, and then
+    /// check the rules that need the block or the spent outputs. Transactions of earlier
+    /// versions always pass.
+    pub fn check_v7_transaction_rules(&self) -> Result<(), v7::TransactionRuleError> {
+        v7::check_transaction_local_rules(self)
+    }
+
+    /// Returns the parts that only a v7 transaction has, or `None` for earlier versions.
+    pub fn v7_fields(&self) -> Option<&v7::V7Fields> {
+        self.v7.as_ref()
+    }
+
+    /// Returns `true` if this is a coinbase transaction.
+    ///
+    /// A v7 transaction is a coinbase transaction exactly when it has a coinbase bundle.
+    /// An earlier transaction is one when its transparent bundle has a single input whose
+    /// previous output is null.
+    pub fn is_coinbase(&self) -> bool {
+        match &self.v7 {
+            Some(fields) => fields.coinbase_bundle.is_some(),
+            None => self
+                .transparent_bundle
+                .as_ref()
+                .is_some_and(|b| b.is_coinbase()),
+        }
+    }
+
+    /// Returns the coinbase bundle of a v7 coinbase transaction.
+    pub fn coinbase_bundle(&self) -> Option<&v7::CoinbaseBundle> {
+        self.v7.as_ref()?.coinbase_bundle.as_ref()
+    }
+
+    /// Returns the `mValuePoolDeltas` map of a v7 transaction in encoding order, or
+    /// `None` for earlier versions.
+    pub fn value_pool_deltas(&self) -> Option<Vec<v7::ValuePoolDelta>> {
+        let fields = self.v7.as_ref()?;
+        Some(v7::value_pool_deltas(
+            &fields.value_deltas,
+            &self.shielded_balances(),
+        ))
+    }
+
+    fn shielded_balances(&self) -> v7::ShieldedBalances {
+        let orchard_balance = |b: &Option<orchard::Bundle<A::OrchardAuth, ZatBalance>>| {
+            b.as_ref()
+                .map_or(ZatBalance::zero(), |b| *b.value_balance())
+        };
+        v7::ShieldedBalances {
+            sapling: self.sapling_value_balance(),
+            orchard: orchard_balance(&self.orchard_bundle),
+            ironwood: orchard_balance(&self.ironwood_bundle),
+        }
+    }
+
     /// Returns the total fees paid by the transaction, given a function that can be used to
     /// retrieve the value of previous transactions' transparent outputs that are being spent in
     /// this transaction.
+    ///
+    /// A v7 transaction states its fee explicitly (ZIP 2002), so its fee is returned
+    /// without looking up any previous outputs. A v7 coinbase transaction pays no fee:
+    /// its fee bundle collects the fees of the other transactions in its block.
     pub fn fee_paid<E, F>(&self, get_prevout: F) -> Result<Option<Zatoshis>, E>
     where
         E: From<BalanceError>,
         F: FnMut(&OutPoint) -> Result<Option<Zatoshis>, E>,
     {
+        if let Some(fields) = &self.v7 {
+            if fields.coinbase_bundle.is_some() {
+                return Ok(Some(Zatoshis::ZERO));
+            }
+            let fee = -fields.value_deltas.fee;
+            return Zatoshis::try_from(fee)
+                .map(Some)
+                .map_err(|_| E::from(BalanceError::Underflow));
+        }
+
         let transparent_balance = self.transparent_bundle.as_ref().map_or_else(
             || Ok(Some(ZatBalance::zero())),
             |b| b.value_balance(get_prevout),
@@ -482,8 +639,15 @@ impl<A: Authorization> TransactionData<A> {
     ///
     /// Version 6 transactions include the Ironwood bundle digest as a separate
     /// Orchard-shaped digest with Ironwood personalization. Earlier transaction
-    /// versions do not include Ironwood in their digest.
+    /// versions do not include Ironwood in their digest. Version 7 transactions also
+    /// digest their value pool delta map and coinbase bundle.
     pub fn digest<D: TransactionDigest<A>>(&self, digester: D) -> D::Digest {
+        let v7_digests = self.v7.as_ref().map(|fields| {
+            digester.digest_v7(
+                &v7::value_pool_deltas(&fields.value_deltas, &self.shielded_balances()),
+                fields.coinbase_bundle.as_ref(),
+            )
+        });
         digester.combine(
             digester.digest_header(
                 self.version,
@@ -491,10 +655,11 @@ impl<A: Authorization> TransactionData<A> {
                 self.lock_time,
                 self.expiry_height,
             ),
-            digester.digest_transparent(self.transparent_bundle.as_ref()),
+            digester.digest_transparent(self.version, self.transparent_bundle.as_ref()),
             digester.digest_sapling(self.version, self.sapling_bundle.as_ref()),
             digester.digest_orchard(self.version, self.orchard_bundle.as_ref()),
-            digester.digest_ironwood(self.ironwood_bundle.as_ref()),
+            digester.digest_ironwood(self.version, self.ironwood_bundle.as_ref()),
+            v7_digests,
         )
     }
 
@@ -520,7 +685,9 @@ impl<A: Authorization> TransactionData<A> {
     /// cross-FFI builder logic in `zcashd`.
     ///
     /// `f_orchard` is also applied to the Ironwood bundle because Ironwood is
-    /// represented with the Orchard bundle type.
+    /// represented with the Orchard bundle type. The v7 fields are kept, so the new
+    /// bundles of v7 data must still satisfy the ZIP 248 bundle-local rules, which
+    /// [`TransactionData::freeze`] checks.
     pub fn map_bundles<B: Authorization>(
         self,
         f_transparent: impl FnOnce(
@@ -544,6 +711,7 @@ impl<A: Authorization> TransactionData<A> {
             sapling_bundle: f_sapling(self.sapling_bundle),
             orchard_bundle: f_orchard(self.orchard_bundle),
             ironwood_bundle: f_orchard(self.ironwood_bundle),
+            v7: self.v7,
         }
     }
 
@@ -553,7 +721,9 @@ impl<A: Authorization> TransactionData<A> {
     /// transaction extraction logic in the `pczt` crate.
     ///
     /// `f_orchard` is also applied to the Ironwood bundle because Ironwood is
-    /// represented with the Orchard bundle type.
+    /// represented with the Orchard bundle type. The v7 fields are kept, so the new
+    /// bundles of v7 data must still satisfy the ZIP 248 bundle-local rules, which
+    /// [`TransactionData::freeze`] checks.
     pub fn try_map_bundles<B: Authorization, E>(
         self,
         f_transparent: impl FnOnce(
@@ -581,6 +751,7 @@ impl<A: Authorization> TransactionData<A> {
             sapling_bundle: f_sapling(self.sapling_bundle)?,
             orchard_bundle: f_orchard(self.orchard_bundle)?,
             ironwood_bundle: f_orchard(self.ironwood_bundle)?,
+            v7: self.v7,
         })
     }
 
@@ -622,6 +793,7 @@ impl<A: Authorization> TransactionData<A> {
                     |f, a| f.map_authorization(a),
                 )
             }),
+            v7: self.v7,
         }
     }
 }
@@ -635,6 +807,11 @@ impl<A: Authorization> TransactionData<A> {
 }
 
 impl TransactionData<Authorized> {
+    /// Computes the transaction identifier, and returns the transaction.
+    ///
+    /// Returns an error for v7 data that violates a ZIP 248 bundle-local rule, as
+    /// [`TransactionData::from_parts_v7`] would, which data changed by
+    /// [`TransactionData::map_bundles`] can.
     pub fn freeze(self) -> io::Result<Transaction> {
         Transaction::from_data(self)
     }
@@ -651,6 +828,7 @@ impl TransactionData<Authorized> {
             }
             TxVersion::V5 => Transaction::read_v5_data(reader, version),
             TxVersion::V6 => Transaction::read_v6_data(reader, version),
+            TxVersion::V7 => v7::transaction::read(reader),
         }
     }
 }
@@ -662,11 +840,14 @@ struct V6HeaderFragment {
 }
 
 impl Transaction {
+    /// Computes the transaction identifier of `data`, which [`TransactionData::map_bundles`]
+    /// may have changed since it was constructed. For v7 data this checks the ZIP 248
+    /// bundle-local rules again, so that no transaction violates them.
     fn from_data(data: TransactionData<Authorized>) -> io::Result<Self> {
+        let data = v7::conform(data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         match data.version {
             TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 => Self::from_data_v4(data),
-            TxVersion::V5 => Ok(Self::from_data_v5(data)),
-            TxVersion::V6 => Ok(Self::from_data_v6(data)),
+            TxVersion::V5 | TxVersion::V6 | TxVersion::V7 => Ok(Self::from_data_v5(data)),
         }
     }
 
@@ -681,17 +862,8 @@ impl Transaction {
         Ok(tx)
     }
 
+    /// Computes the identifier of a v5 or later transaction from its digest tree.
     fn from_data_v5(data: TransactionData<Authorized>) -> Self {
-        let txid = to_txid(
-            data.version,
-            data.consensus_branch_id,
-            &data.digest(TxIdDigester),
-        );
-
-        Transaction { txid, data }
-    }
-
-    fn from_data_v6(data: TransactionData<Authorized>) -> Self {
         let txid = to_txid(
             data.version,
             data.consensus_branch_id,
@@ -727,9 +899,12 @@ impl Transaction {
                 reader.into_base_reader(),
                 version,
             )?)),
-            TxVersion::V6 => Ok(Self::from_data_v6(Self::read_v6_data(
+            TxVersion::V6 => Ok(Self::from_data_v5(Self::read_v6_data(
                 reader.into_base_reader(),
                 version,
+            )?)),
+            TxVersion::V7 => Ok(Self::from_data_v5(v7::transaction::read(
+                reader.into_base_reader(),
             )?)),
         }
     }
@@ -800,6 +975,7 @@ impl Transaction {
             }),
             orchard_bundle: None,
             ironwood_bundle: None,
+            v7: None,
         })
     }
 
@@ -848,6 +1024,7 @@ impl Transaction {
             sapling_bundle,
             orchard_bundle,
             ironwood_bundle: None,
+            v7: None,
         };
 
         Ok(data)
@@ -882,6 +1059,7 @@ impl Transaction {
             sapling_bundle,
             orchard_bundle,
             ironwood_bundle,
+            v7: None,
         };
 
         Ok(data)
@@ -931,10 +1109,24 @@ impl Transaction {
             TxVersion::Sprout(_) | TxVersion::V3 | TxVersion::V4 => self.write_v4(writer),
             TxVersion::V5 => self.write_v5(writer),
             TxVersion::V6 => self.write_v6(writer),
+            TxVersion::V7 => v7::transaction::write(self, writer),
         }
     }
 
+    fn check_legacy_writer_version(&self) -> io::Result<()> {
+        if self.version == TxVersion::V7 {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "v7 transactions require the v7 envelope encoding",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Rejects v7 before writing any bytes. Use [`Self::write`] to select the format automatically.
     pub fn write_v4<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        self.check_legacy_writer_version()?;
         if self.orchard_bundle.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -987,7 +1179,9 @@ impl Transaction {
         Ok(())
     }
 
+    /// Rejects v7 before writing any bytes. Use [`Self::write`] to select the format automatically.
     pub fn write_v5<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        self.check_legacy_writer_version()?;
         if self.sprout_bundle.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1002,7 +1196,9 @@ impl Transaction {
         Ok(())
     }
 
+    /// Rejects v7 before writing any bytes. Use [`Self::write`] to select the format automatically.
     pub fn write_v6<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        self.check_legacy_writer_version()?;
         if self.sprout_bundle.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1064,15 +1260,32 @@ pub struct TransparentDigests<A> {
 #[derive(Clone, Debug)]
 pub struct TxDigests<A> {
     pub header_digest: A,
+    /// The digests of the transparent inputs and outputs. For a v7 transaction this is
+    /// `None` when the transaction has no transparent effecting bundle.
     pub transparent_digests: Option<TransparentDigests<A>>,
+    /// The Sapling digest: for a v7 transaction, the `sapling_effects_digest` of
+    /// ZIP 248, which does not commit to the value balance.
     pub sapling_digest: Option<A>,
+    /// The Orchard digest: for a v7 transaction, the `orchard_effects_digest` of ZIP 248.
     pub orchard_digest: Option<A>,
-    /// The digest of the Ironwood bundle used by version 6 transactions.
+    /// The digest of the Ironwood bundle used by version 6 and 7 transactions.
     ///
     /// This is `None` when the transaction has no Ironwood bundle. When a version 6 transaction
     /// ID is derived from these digests, `None` is combined as the empty Ironwood bundle digest
-    /// using the Ironwood bundle personalization.
+    /// using the Ironwood bundle personalization; a version 7 transaction ID omits the bundle.
     pub ironwood_digest: Option<A>,
+    /// The digests of the parts only v7 transactions have; `Some` exactly for v7.
+    pub v7_digests: Option<V7TxIdDigests<A>>,
+}
+
+/// The transaction identifier digests of the parts only v7 transactions have.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct V7TxIdDigests<A> {
+    /// T.2 `value_pool_deltas_digest`.
+    pub value_pool_deltas_digest: A,
+    /// T.3.1 `coinbase_effects_digest`, present exactly for a coinbase transaction.
+    pub coinbase_digest: Option<A>,
 }
 
 pub trait TransactionDigest<A: Authorization> {
@@ -1080,8 +1293,10 @@ pub trait TransactionDigest<A: Authorization> {
     type TransparentDigest;
     type SaplingDigest;
     type OrchardDigest;
-    /// The digest type produced for the Ironwood bundle in version 6 transactions.
+    /// The digest type produced for the Ironwood bundle in version 6 and 7 transactions.
     type IronwoodDigest;
+    /// The digest type produced for the parts only version 7 transactions have.
+    type V7Digest;
 
     type Digest;
 
@@ -1095,6 +1310,7 @@ pub trait TransactionDigest<A: Authorization> {
 
     fn digest_transparent(
         &self,
+        version: TxVersion,
         transparent_bundle: Option<&transparent::Bundle<A::TransparentAuth>>,
     ) -> Self::TransparentDigest;
 
@@ -1120,9 +1336,20 @@ pub trait TransactionDigest<A: Authorization> {
     /// policy than transaction ID digesters.
     fn digest_ironwood(
         &self,
+        version: TxVersion,
         ironwood_bundle: Option<&orchard::Bundle<A::OrchardAuth, ZatBalance>>,
     ) -> Self::IronwoodDigest;
 
+    /// Computes the digest of the parts only version 7 transactions have: the value pool
+    /// delta map in encoding order, and the coinbase bundle. It is called only for
+    /// version 7 transactions.
+    fn digest_v7(
+        &self,
+        value_pool_deltas: &[v7::ValuePoolDelta],
+        coinbase_bundle: Option<&v7::CoinbaseBundle>,
+    ) -> Self::V7Digest;
+
+    /// Combines the digests. `v7_digests` is `Some` exactly for version 7 transactions.
     fn combine(
         &self,
         header_digest: Self::HeaderDigest,
@@ -1130,6 +1357,7 @@ pub trait TransactionDigest<A: Authorization> {
         sapling_digest: Self::SaplingDigest,
         orchard_digest: Self::OrchardDigest,
         ironwood_digest: Self::IronwoodDigest,
+        v7_digests: Option<Self::V7Digest>,
     ) -> Self::Digest;
 }
 
@@ -1150,6 +1378,7 @@ pub mod testing {
             orchard::testing::{self as orchard},
             sapling::testing::{self as sapling},
         },
+        v7,
     };
 
     pub fn arb_txid() -> impl Strategy<Value = TxId> {
@@ -1168,7 +1397,8 @@ pub mod testing {
             BranchId::Nu6_1 => Just(TxVersion::V5).boxed(),
             BranchId::Nu6_2 => Just(TxVersion::V5).boxed(),
             BranchId::Nu6_3 => Just(TxVersion::V6).boxed(),
-            BranchId::Nu7 | BranchId::Nu7_1 => Just(TxVersion::V6).boxed(),
+            BranchId::Nu7 => Just(TxVersion::V6).boxed(),
+            BranchId::Nu7_1 => prop_oneof![Just(TxVersion::V6), Just(TxVersion::V7)].boxed(),
         }
     }
 
@@ -1177,24 +1407,32 @@ pub mod testing {
             version in arb_tx_version(consensus_branch_id)
         )(
             lock_time in any::<u32>(),
-            expiry_height in any::<u32>(),
+            expiry_height in 0..=if version == TxVersion::V7 { super::v7::MAX_V7_HEIGHT } else { u32::MAX },
             transparent_bundle in transparent::arb_bundle(),
             sapling_bundle in sapling::arb_bundle_for_version(version),
             orchard_bundle in orchard::arb_bundle_for_version(version),
             ironwood_bundle in orchard::arb_ironwood_bundle_for_version(version),
+            v7 in v7::testing::arb_v7_fields_for_version(version),
             version in Just(version),
         ) -> TransactionData<Authorized> {
-            TransactionData {
+            let mut tx = TransactionData {
                 version,
                 consensus_branch_id,
                 lock_time,
                 expiry_height: expiry_height.into(),
-                transparent_bundle,
+                // A v7 transparent bundle without inputs or outputs is encoded by omitting
+                // it, so it does not survive a round trip.
+                transparent_bundle: transparent_bundle.filter(|b| {
+                    version != TxVersion::V7 || super::v7::transparent::has_effects(b)
+                }),
                 sprout_bundle: None,
                 sapling_bundle,
                 orchard_bundle,
                 ironwood_bundle,
-            }
+                v7,
+            };
+            v7::testing::fit_v7_fields(&mut tx);
+            tx
         }
     }
 

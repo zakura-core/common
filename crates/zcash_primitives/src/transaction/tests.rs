@@ -805,7 +805,7 @@ fn v6_sapling_auth_digest_uses_v6_domain_and_appends_anchor() {
         Some(&bundle),
     );
 
-    assert_eq!(actual, h.finalize());
+    assert_eq!(actual, Some(h.finalize()));
 }
 
 #[cfg(test)]
@@ -829,7 +829,7 @@ fn v6_sapling_output_only_auth_digest_uses_v6_domain_without_anchor() {
         Some(&bundle),
     );
 
-    assert_eq!(actual, h.finalize());
+    assert_eq!(actual, Some(h.finalize()));
 }
 
 #[cfg(test)]
@@ -858,6 +858,37 @@ fn check_roundtrip(tx: Transaction) -> Result<(), TestCaseError> {
     let mut txn_bytes = vec![];
     tx.write(&mut txn_bytes).unwrap();
     let txo = Transaction::read(&txn_bytes[..], tx.consensus_branch_id).unwrap();
+
+    prop_assert_eq!(tx.v7_fields(), txo.v7_fields());
+    // The v5 generator may give spends different anchors even though the wire format
+    // encodes one shared anchor. From v6 onward the anchor is authorizing data.
+    if matches!(tx.version, TxVersion::V6 | TxVersion::V7) {
+        prop_assert_eq!(tx.txid(), txo.txid());
+        prop_assert_eq!(tx.auth_commitment(), txo.auth_commitment());
+        let mut rewritten = vec![];
+        txo.write(&mut rewritten).unwrap();
+        prop_assert_eq!(&txn_bytes, &rewritten);
+    }
+    // The envelope digests decode each payload on its own, and reach the digest functions
+    // the typed digesters use from those payloads, so they must agree.
+    if tx.version == TxVersion::V7 {
+        if let Some(bundle) = tx.sapling_bundle() {
+            let decoded = txo.sapling_bundle().unwrap();
+            prop_assert!(
+                bundle
+                    .shielded_spends()
+                    .iter()
+                    .map(|s| s.anchor())
+                    .eq(decoded.shielded_spends().iter().map(|s| s.anchor()))
+            );
+        }
+        let envelope = super::v7::Envelope::read(&txn_bytes[..]).unwrap();
+        prop_assert_eq!(envelope.txid(|_| None).unwrap(), tx.txid());
+        prop_assert_eq!(
+            envelope.auth_digest(|_| None).unwrap(),
+            tx.auth_commitment()
+        );
+    }
 
     prop_assert_eq!(tx.version, txo.version);
     prop_assert_eq!(tx.lock_time, txo.lock_time);
@@ -914,6 +945,14 @@ proptest! {
     #[test]
     #[cfg(all(feature = "expensive-tests", not(feature = "no-expensive-tests")))]
     fn tx_serialization_roundtrip_heartwood(tx in arb_tx(BranchId::Heartwood)) {
+        check_roundtrip(tx)?;
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(10))]
+    #[test]
+    fn tx_serialization_roundtrip_nu7_1(tx in arb_tx(BranchId::Nu7_1)) {
         check_roundtrip(tx)?;
     }
 }
