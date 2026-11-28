@@ -1199,6 +1199,28 @@ fn hand_written_bundle_lists_follow_the_registry() {
 }
 
 #[test]
+fn legacy_writers_reject_v7_before_writing() {
+    let wire = hex::decode(super::vectors::TEST_VECTORS[MINIMAL_COINBASE].tx).unwrap();
+    let tx = Transaction::read(&wire[..], BranchId::Nu7_1).unwrap();
+    let mut encoded = Vec::new();
+    tx.write(&mut encoded).unwrap();
+    assert_eq!(encoded, wire);
+
+    let mut output = vec![0xaa];
+    for result in [
+        tx.write_v4(&mut output),
+        tx.write_v5(&mut output),
+        tx.write_v6(&mut output),
+    ] {
+        assert_eq!(
+            result.unwrap_err().kind(),
+            corez::io::ErrorKind::InvalidInput
+        );
+    }
+    assert_eq!(output, [0xaa]);
+}
+
+#[test]
 fn coinbase_readers_agree_on_payload_boundaries() {
     use crate::transaction::v7::{BundleData, coinbase};
 

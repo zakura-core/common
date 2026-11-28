@@ -1090,7 +1090,20 @@ impl Transaction {
         }
     }
 
+    fn check_legacy_writer_version(&self) -> io::Result<()> {
+        if self.version == TxVersion::V7 {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "v7 transactions require the v7 envelope encoding",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Rejects v7 before writing any bytes. Use [`Self::write`] to select the format automatically.
     pub fn write_v4<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        self.check_legacy_writer_version()?;
         if self.orchard_bundle.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1143,7 +1156,9 @@ impl Transaction {
         Ok(())
     }
 
+    /// Rejects v7 before writing any bytes. Use [`Self::write`] to select the format automatically.
     pub fn write_v5<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        self.check_legacy_writer_version()?;
         if self.sprout_bundle.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1158,7 +1173,9 @@ impl Transaction {
         Ok(())
     }
 
+    /// Rejects v7 before writing any bytes. Use [`Self::write`] to select the format automatically.
     pub fn write_v6<W: Write>(&self, mut writer: W) -> io::Result<()> {
+        self.check_legacy_writer_version()?;
         if self.sprout_bundle.is_some() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
