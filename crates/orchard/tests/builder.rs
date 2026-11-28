@@ -687,7 +687,10 @@ fn per_signature_digests_sign_and_verify() {
     let sk = SpendingKey::from_bytes([0; 32]).unwrap();
     let ask = SpendAuthorizingKey::from(&sk);
     let fvk = FullViewingKey::from(&sk);
-    let recipient = fvk.address_at(0u32, Scope::External);
+    let recipient = fvk.address(
+        orchard::keys::Diversifier::from_bytes(Default::default()),
+        Scope::External,
+    );
 
     // Every action of a shielding bundle spends a dummy note, which `prepare` signs.
     let shielding_bundle: Bundle<_, i64> = {
