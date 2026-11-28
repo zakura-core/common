@@ -924,8 +924,7 @@ impl<P, U> Builder<P, U> {
         })
     }
 
-    /// Returns `true` if any Ironwood spend, output, or change output has been
-    /// added to this builder (i.e. the transaction will carry an Ironwood bundle).
+    /// Returns `true` if a requested payment or required padding needs an Ironwood bundle.
     fn ironwood_in_use(&self) -> bool {
         self.ironwood_builder.as_ref().is_some_and(|b| {
             matches!(
@@ -941,9 +940,13 @@ impl<P, U> Builder<P, U> {
     }
 
     /// At NU7.1 a wallet can send v5 unless the transaction needs Ironwood.
+    #[cfg(any(feature = "circuits", feature = "pczt"))]
     fn transaction_version(&self) -> TxVersion {
         self.proposed_version.unwrap_or_else(|| {
-            if self.consensus_branch_id == BranchId::Nu7_1 && !self.ironwood_in_use() {
+            if self.consensus_branch_id == BranchId::Nu7_1
+                && !self.build_config.is_coinbase()
+                && !self.ironwood_in_use()
+            {
                 TxVersion::V5
             } else {
                 TxVersion::suggested_for_branch(self.consensus_branch_id)
@@ -2662,6 +2665,33 @@ mod tests {
                 &crate::transaction::fees::zip317::FeeRule::standard(),
             ),
             Err(Error::InsufficientFunds(_))
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "circuits")]
+    fn required_ironwood_padding_needs_v6_at_nu7_1() {
+        let mut network = nu7_test_network();
+        network.nu7_1 = Some(12u32.into());
+        let mut builder = Builder::new(
+            network,
+            12u32.into(),
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+                orchard_padding: BundlePadding::DEFAULT,
+                ironwood_padding: BundlePadding {
+                    bundle_required: true,
+                    ..BundlePadding::DEFAULT
+                },
+            },
+        );
+        assert_eq!(builder.transaction_version(), TxVersion::V6);
+        assert!(
+            builder
+                .propose_version::<Infallible>(TxVersion::V5)
+                .is_err()
         );
     }
 

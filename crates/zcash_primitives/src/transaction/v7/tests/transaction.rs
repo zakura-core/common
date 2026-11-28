@@ -152,15 +152,15 @@ pub(super) fn all_signature_digests(
             .map(|index| ShieldedSignature::SpendAuth { index })
             .chain([ShieldedSignature::Binding]);
         for signature in signatures {
-            let digest = signature_hash(
-                tx,
-                &SignableInput::V7Shielded {
-                    bundle_type,
-                    signature,
-                },
-                txid_parts,
-            )
-            .unwrap();
+            let signer = SignableInput::V7Shielded {
+                bundle_type,
+                signature,
+            };
+            let digest = prepared.signature_hash(&signer).unwrap();
+            assert_eq!(
+                digest.as_ref(),
+                signature_hash(tx, &signer, txid_parts).unwrap().as_ref()
+            );
             let position = match signature {
                 ShieldedSignature::SpendAuth { index } => alloc::format!("{index}"),
                 ShieldedSignature::Binding => "b".into(),
