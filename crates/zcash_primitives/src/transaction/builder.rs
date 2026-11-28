@@ -697,12 +697,6 @@ impl<P: consensus::Parameters> DeferredPcztBuilder<P> {
         mut rng: R,
         fee_rule: &FR,
     ) -> Result<PcztResult<P>, Error<FR::Error>> {
-        fn in_use(builder: &orchard::builder::Builder) -> bool {
-            !builder.spends().is_empty()
-                || !builder.outputs().is_empty()
-                || !builder.changes().is_empty()
-        }
-
         let fee = self.get_fee(fee_rule).map_err(Error::Fee)?;
 
         // After fees are accounted for, the value balance of the transaction must be zero.
@@ -728,7 +722,12 @@ impl<P: consensus::Parameters> DeferredPcztBuilder<P> {
             Ordering::Equal => (),
         };
 
-        let (orchard_bundle, orchard_meta) = if in_use(&self.orchard_builder) {
+        let (orchard_bundle, orchard_meta) = if self
+            .orchard_builder
+            .num_actions()
+            .map_err(|e| Error::Fee(FeeError::Bundle(e)))?
+            > 0
+        {
             let (bundle, meta) = self
                 .orchard_builder
                 .build_for_pczt(&mut rng)
@@ -737,7 +736,12 @@ impl<P: consensus::Parameters> DeferredPcztBuilder<P> {
         } else {
             (None, orchard::builder::BundleMetadata::empty())
         };
-        let (ironwood_bundle, ironwood_meta) = if in_use(&self.ironwood_builder) {
+        let (ironwood_bundle, ironwood_meta) = if self
+            .ironwood_builder
+            .num_actions()
+            .map_err(|e| Error::Fee(FeeError::Bundle(e)))?
+            > 0
+        {
             let (bundle, meta) = self
                 .ironwood_builder
                 .build_for_pczt(&mut rng)
@@ -1973,7 +1977,10 @@ mod tests {
     #[cfg(feature = "circuits")]
     use {
         super::{Builder, Error},
-        crate::transaction::builder::{BuildConfig, BundlePadding},
+        crate::transaction::{
+            TxVersion,
+            builder::{BuildConfig, BundlePadding},
+        },
         ::sapling::{Node, Rseed, zip32::ExtendedSpendingKey},
         ::transparent::{address::TransparentAddress, builder::TransparentSigningSet},
         assert_matches::assert_matches,
@@ -1990,9 +1997,7 @@ mod tests {
 
     #[cfg(feature = "transparent-inputs")]
     use {
-        crate::transaction::{
-            OutPoint, TxOut, TxVersion, builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA,
-        },
+        crate::transaction::{OutPoint, TxOut, builder::PRE_NU7_DEFAULT_TX_EXPIRY_DELTA},
         ::transparent::keys::{AccountPrivKey, IncomingViewingKey},
         zcash_protocol::consensus::BranchId,
         zip32::AccountId,
@@ -2087,6 +2092,45 @@ mod tests {
                     counts.3
                 )
                 .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", feature = "pczt", feature = "non-standard-fees"))]
+    fn deferred_pczt_emits_required_padding_in_each_pool() {
+        let required = BundlePadding {
+            bundle_required: true,
+            pad_to_minimum: Some(3),
+        };
+        for (orchard, ironwood) in [
+            (required, BundlePadding::DEFAULT),
+            (BundlePadding::DEFAULT, required),
+        ] {
+            let builder = super::DeferredPcztBuilder::new::<Infallible>(
+                nu6_3_test_network(),
+                10u32.into(),
+                orchard,
+                ironwood,
+            )
+            .unwrap();
+            let fee = crate::transaction::fees::zip317::FeeRule::standard();
+            assert_eq!(
+                builder.get_fee(&fee).unwrap(),
+                Zatoshis::const_from_u64(15_000)
+            );
+            let zero_fee = crate::transaction::fees::fixed::FeeRule::non_standard(Zatoshis::ZERO);
+            let parts = builder
+                .build_for_pczt(thread_rng(), &zero_fee)
+                .unwrap()
+                .pczt_parts;
+            assert_eq!(
+                parts.orchard.map(|b| b.actions().len()),
+                orchard.bundle_required.then_some(3)
+            );
+            assert_eq!(
+                parts.ironwood.map(|b| b.actions().len()),
+                ironwood.bundle_required.then_some(3)
             );
         }
     }
