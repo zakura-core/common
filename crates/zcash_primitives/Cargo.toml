@@ -52,6 +52,7 @@ rand = "0.10"
 sapling = { workspace = true, features = ["pinned-vk-only", "test-dependencies", "zip32-addresses"] }
 transparent = { workspace = true, features = ["test-dependencies"] }
 zcash_protocol = { workspace = true, features = ["local-consensus", "test-dependencies"] }
+zcash_script = { workspace = true, features = ["signature-validation"] }
 zip32 = { version = "0.2", default-features = false }
 
 [target."cfg(unix)".dev-dependencies]

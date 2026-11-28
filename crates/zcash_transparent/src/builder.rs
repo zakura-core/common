@@ -490,6 +490,27 @@ impl TransparentBuilder {
         })
     }
 
+    /// Builds the transparent bundle of a v7 coinbase transaction ([ZIP 248]), or `None`
+    /// if there are no outputs.
+    ///
+    /// A v7 coinbase transaction identifies itself and states its block height with a
+    /// coinbase bundle instead of a coinbase input, so its transparent bundle has only
+    /// outputs. Returns an error if any inputs were added to the builder.
+    ///
+    /// [ZIP 248]: https://zips.z.cash/zip-0248
+    pub fn build_v7_coinbase(self) -> Result<Option<Bundle<Coinbase>>, coinbase::Error> {
+        #[cfg(feature = "transparent-inputs")]
+        if !self.inputs.is_empty() {
+            return Err(coinbase::Error::UnexpectedInputs);
+        }
+
+        Ok((!self.vout.is_empty()).then(|| Bundle {
+            vin: vec![],
+            vout: self.vout,
+            authorization: Coinbase,
+        }))
+    }
+
     /// Builds a bundle containing the given inputs and outputs, for inclusion in a PCZT.
     #[cfg(feature = "pczt")]
     pub fn build_for_pczt(self) -> Option<pczt::Bundle> {
