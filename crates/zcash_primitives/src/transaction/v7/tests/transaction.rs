@@ -41,6 +41,7 @@ use crate::transaction::{
 /// A transparent authorizing context that knows the spent outputs, as a verifier would.
 #[derive(Debug)]
 pub(super) struct SpentOutputs {
+    reads: core::cell::Cell<usize>,
     pub(super) amounts: Vec<Zatoshis>,
     pub(super) script_pubkeys: Vec<Script>,
 }
@@ -51,10 +52,12 @@ impl transparent::Authorization for SpentOutputs {
 
 impl TransparentAuthorizingContext for SpentOutputs {
     fn input_amounts(&self) -> Vec<Zatoshis> {
+        self.reads.set(self.reads.get() + 1);
         self.amounts.clone()
     }
 
     fn input_scriptpubkeys(&self) -> Vec<Script> {
+        self.reads.set(self.reads.get() + 1);
         self.script_pubkeys.clone()
     }
 }
@@ -106,6 +109,7 @@ pub(super) fn all_signature_digests(
     txid_parts: &TxDigests<blake2b_simd::Hash>,
 ) -> Vec<(String, [u8; 32])> {
     let mut digests = Vec::new();
+    let prepared = crate::transaction::sighash::V7SignatureHashes::new(tx).unwrap();
     if let Some(bundle) = tx.transparent_bundle() {
         let amounts = bundle.authorization.input_amounts();
         let scripts = bundle.authorization.input_scriptpubkeys();
@@ -119,8 +123,12 @@ pub(super) fn all_signature_digests(
                 amounts[index],
             )
             .unwrap();
-            let digest =
-                signature_hash(tx, &SignableInput::Transparent(input), txid_parts).unwrap();
+            let signer = SignableInput::Transparent(input);
+            let digest = prepared.signature_hash(&signer).unwrap();
+            assert_eq!(
+                digest.as_ref(),
+                signature_hash(tx, &signer, txid_parts).unwrap().as_ref()
+            );
             digests.push((alloc::format!("t {index}"), *digest.as_ref()));
         }
     }
@@ -366,6 +374,7 @@ fn shaped_tx(parts: &VectorParts, shape: Shape) -> (Transaction, SpentOutputs) {
         authorization: transparent::Authorized,
     };
     let spent = SpentOutputs {
+        reads: Default::default(),
         amounts: shape.spent.iter().map(|v| zats(*v)).collect(),
         script_pubkeys: (0..shape.spent.len())
             .map(|i| script_pubkey(100 + u8::try_from(i).unwrap()))
@@ -512,6 +521,7 @@ fn verifying_vector(tv: &super::vectors::TestVector) -> (Transaction, Transactio
     let bytes = hex::decode(tv.tx.as_bytes()).unwrap();
     let tx = Transaction::read(&bytes[..], BranchId::Nu7_1).unwrap();
     let spent = SpentOutputs {
+        reads: Default::default(),
         amounts: tv
             .amounts
             .iter()
@@ -1297,6 +1307,37 @@ fn v7_is_rejected_outside_nu7_1() {
 }
 
 #[test]
+fn prepared_signatures_read_previous_outputs_only_once() {
+    let tv = &super::vectors::TEST_VECTORS[SHIELDING];
+    let (_, tx) = verifying_vector(tv);
+    let bundle = tx.transparent_bundle().unwrap();
+    let prev = &bundle.authorization;
+    assert!(bundle.vin.len() > 1);
+    let prepared = crate::transaction::sighash::V7SignatureHashes::new(&tx).unwrap();
+    for index in 0..bundle.vin.len() {
+        let script = &prev.script_pubkeys[index];
+        let input = TransparentSignableInput::from_parts(
+            bundle,
+            SighashType::ALL,
+            index,
+            script,
+            script,
+            prev.amounts[index],
+        )
+        .unwrap();
+        let digest = prepared
+            .signature_hash(&SignableInput::Transparent(input))
+            .unwrap();
+        assert_eq!(hex::encode(digest.as_ref()), tv.sighashes[index].1);
+    }
+    assert_eq!(
+        prev.reads.get(),
+        2,
+        "each previous-output list is read once"
+    );
+}
+
+#[test]
 fn signature_digests_reject_mismatched_signers() {
     let (_, verifying) = verifying_vector(&super::vectors::TEST_VECTORS[0]);
     let txid_parts = verifying.digest(TxIdDigester);
@@ -1374,6 +1415,7 @@ fn signature_digests_reject_mismatched_signers() {
     let short = with_spent_outputs(
         &tx,
         SpentOutputs {
+            reads: Default::default(),
             amounts: Vec::new(),
             script_pubkeys: Vec::new(),
         },

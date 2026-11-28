@@ -81,43 +81,85 @@ pub(crate) fn v7_signature_hash<
     tx: &TransactionData<A>,
     signable_input: &SignableInput<'_>,
     txid_parts: &TxDigests<Blake2bHash>,
-) -> Result<Blake2bHash, SighashError> {
-    let spent = SpentOutputs::of(tx)?;
-    let (bundle, context) = match signable_input {
-        SignableInput::Shielded => return Err(SighashError::SignerVersionMismatch),
-        SignableInput::Transparent(input) => {
-            // Variant 0 replaces the transparent sighash types: a signature verified
-            // with it must use SIGHASH_ALL.
-            if *input.hash_type() != SighashType::ALL {
-                return Err(SighashError::UnsupportedHashType(
-                    input.hash_type().encode(),
-                ));
-            }
-            let index = *input.index();
-            // The signer's description of the spent output must agree with the one that
-            // every signature commits to through S.3 and S.4.
-            if spent.amounts.get(index) != Some(input.value())
-                || spent.script_pubkeys.get(index) != Some(*input.script_pubkey())
-            {
-                return Err(SighashError::SpentOutputMismatch);
-            }
-            (
-                BundleId::TRANSPARENT,
-                transparent_context(tx, &spent, index)?,
-            )
+) -> Result<super::sighash::SignatureHash, SighashError> {
+    V7SignatureHashes::from_parts(tx, txid_parts)?.signature_hash(signable_input)
+}
+
+/// Prepared variant-0 signature hashes for one v7 transaction. Preparation reads
+/// the previous outputs from its transparent authorizing context once. The caller
+/// must supply the actual spent outputs through that context, in input order.
+pub struct V7SignatureHashes<'a, A: Authorization> {
+    tx: &'a TransactionData<A>,
+    spent: SpentOutputs,
+    prefix: SighashPrefix,
+}
+
+impl<'a, A: Authorization> V7SignatureHashes<'a, A>
+where
+    A::TransparentAuth: TransparentAuthorizingContext,
+{
+    /// Computes the transaction ID and the two spent-output commitments once.
+    pub fn new(tx: &'a TransactionData<A>) -> Result<Self, SighashError> {
+        if tx.version() != super::TxVersion::V7 {
+            return Err(SighashError::SignerVersionMismatch);
         }
-        SignableInput::V7Shielded {
-            bundle_type,
-            signature,
-        } => {
-            let count = shielded_signature_count(tx, *bundle_type)?;
-            (
-                BundleId::new((*bundle_type).into(), BundleVariant::V0),
-                shielded_context(*signature, count)?,
-            )
-        }
-    };
-    Ok(SighashPrefix::new(tx.consensus_branch_id, txid_parts, &spent)?.digest(bundle, &context))
+        Self::from_parts(tx, &tx.digest(super::TxIdDigester))
+    }
+
+    fn from_parts(
+        tx: &'a TransactionData<A>,
+        txid_parts: &TxDigests<Blake2bHash>,
+    ) -> Result<Self, SighashError> {
+        let spent = SpentOutputs::of(tx)?;
+        let prefix = SighashPrefix::new(tx.consensus_branch_id, txid_parts, &spent)?;
+        Ok(Self { tx, spent, prefix })
+    }
+
+    /// Computes the digest for a single signer using the prepared commitments.
+    pub fn signature_hash(
+        &self,
+        signable_input: &SignableInput<'_>,
+    ) -> Result<super::sighash::SignatureHash, SighashError> {
+        let tx = self.tx;
+        let spent = &self.spent;
+        let (bundle, context) = match signable_input {
+            SignableInput::Shielded => return Err(SighashError::SignerVersionMismatch),
+            SignableInput::Transparent(input) => {
+                // Variant 0 replaces the transparent sighash types: a signature verified
+                // with it must use SIGHASH_ALL.
+                if *input.hash_type() != SighashType::ALL {
+                    return Err(SighashError::UnsupportedHashType(
+                        input.hash_type().encode(),
+                    ));
+                }
+                let index = *input.index();
+                // The signer's description of the spent output must agree with the one that
+                // every signature commits to through S.3 and S.4.
+                if spent.amounts.get(index) != Some(input.value())
+                    || spent.script_pubkeys.get(index) != Some(*input.script_pubkey())
+                {
+                    return Err(SighashError::SpentOutputMismatch);
+                }
+                (
+                    BundleId::TRANSPARENT,
+                    transparent_context(tx, spent, index)?,
+                )
+            }
+            SignableInput::V7Shielded {
+                bundle_type,
+                signature,
+            } => {
+                let count = shielded_signature_count(tx, *bundle_type)?;
+                (
+                    BundleId::new((*bundle_type).into(), BundleVariant::V0),
+                    shielded_context(*signature, count)?,
+                )
+            }
+        };
+        Ok(super::sighash::SignatureHash(
+            self.prefix.digest(bundle, &context),
+        ))
+    }
 }
 
 /// The amounts and script public keys of the outputs that a transaction's transparent

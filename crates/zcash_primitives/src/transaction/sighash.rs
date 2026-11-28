@@ -84,7 +84,9 @@ impl fmt::Display for SighashError {
 
 impl core::error::Error for SighashError {}
 
-pub struct SignatureHash(Blake2bHash);
+pub struct SignatureHash(pub(super) Blake2bHash);
+
+pub use super::sighash_v7::V7SignatureHashes;
 
 impl AsRef<[u8; 32]> for SignatureHash {
     fn as_ref(&self) -> &[u8; 32] {
@@ -96,6 +98,9 @@ impl AsRef<[u8; 32]> for SignatureHash {
 /// the full data of the transaction, the input being signed, and the
 /// set of precomputed hashes produced in the construction of the
 /// transaction ID.
+///
+/// For several v7 signatures on the same transaction, use [`V7SignatureHashes`]
+/// to reuse the transaction ID and spent-output commitments.
 ///
 /// Returns an error if `signable_input` cannot be signed in this transaction: see
 /// [`SighashError`]. Before v7, only [`SignableInput::V7Shielded`] is rejected.
@@ -120,6 +125,6 @@ pub fn signature_hash<
 
         TxVersion::V6 => v6_signature_hash(tx, signable_input, txid_parts),
 
-        TxVersion::V7 => v7_signature_hash(tx, signable_input, txid_parts)?,
+        TxVersion::V7 => return v7_signature_hash(tx, signable_input, txid_parts),
     }))
 }
