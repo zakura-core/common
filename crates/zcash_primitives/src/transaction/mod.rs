@@ -510,18 +510,23 @@ impl<A: Authorization> TransactionData<A> {
         self.ironwood_bundle.as_ref()
     }
 
-    /// Checks the ZIP 248 value and input and output rules that a v7 transaction decides
-    /// by itself: the sign of the fee, that the value pool deltas sum to zero, that the
-    /// transaction has an input and an output, that the Orchard pool balance is not
-    /// negative, that the transparent delta is consistent with the transparent outputs,
-    /// and that a coinbase transaction's expiry height is its block height and its
-    /// coinbase delta is the block subsidy less the lockbox deposit and the ZIP 235 fee
-    /// contribution.
+    /// Checks these consensus rules, each of which a v7 transaction decides by itself:
+    /// the sign of the fee, that the value pool deltas sum to zero, that the transaction
+    /// has an input and an output, that an Orchard or Ironwood bundle has spends or
+    /// outputs enabled, that the Orchard pool balance is not negative, that no transparent
+    /// input has a null previous output, that the transparent delta is consistent with
+    /// the transparent outputs, and that a coinbase transaction has no Orchard actions,
+    /// expires at its block height, and has a coinbase delta equal to the block subsidy
+    /// less the lockbox deposit and the ZIP 235 fee contribution.
     ///
     /// It does not verify proofs or signatures, or any rule on the contents of a shielded
-    /// bundle. Decoding does not check these rules, because a transaction that breaks one
-    /// is well-formed. Full validators call this, and then check the rules that need the
-    /// block or the spent outputs. Transactions of earlier versions always pass.
+    /// bundle, and it does not check the limit of 65,535 Sapling spends, Sapling outputs,
+    /// and Orchard or Ironwood actions, a previous output or nullifier that the
+    /// transaction repeats, or the total value of the transparent outputs of a
+    /// transaction with transparent inputs. Decoding does not check these rules, because a
+    /// transaction that breaks one is well-formed. Full validators call this, and then
+    /// check the rules that need the block or the spent outputs. Transactions of earlier
+    /// versions always pass.
     pub fn check_v7_transaction_rules(&self) -> Result<(), v7::TransactionRuleError> {
         v7::check_transaction_local_rules(self)
     }

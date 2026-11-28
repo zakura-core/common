@@ -9,11 +9,12 @@
 //! checksig operation uses `SIGHASH_ALL` can only be checked by running its scripts, under
 //! `zcash_script`'s `Flags::SigHashAllOnly`.
 //!
-//! The rules that relate the values of a transaction's bundles to each other are not
-//! bundle-local: a transaction that breaks one is well-formed, and still decodes.
-//! [`TransactionData::check_v7_transaction_rules`] checks those of them that one
-//! transaction decides by itself, which full validators call before the checks that need
-//! the block or the spent outputs.
+//! Most other consensus rules are not bundle-local: a transaction that breaks one is
+//! well-formed, and still decodes. The exceptions are bundles that typed data cannot
+//! hold, an unregistered pair or the ZIP 233 bundle, which decoding rejects.
+//! [`TransactionData::check_v7_transaction_rules`] checks the rules it lists, each of
+//! which one transaction decides by itself. Full validators call it before the checks
+//! that need the block or the spent outputs.
 
 use core::fmt;
 
@@ -184,8 +185,9 @@ fn spent_pool<A: Authorization>(tx: &TransactionData<A>) -> Option<BundleType> {
     .find_map(|(pool, spends)| spends.then_some(pool))
 }
 
-/// A violation of a ZIP 248 value or input and output rule that one v7 transaction
-/// decides by itself, found by [`TransactionData::check_v7_transaction_rules`].
+/// A violation of one of the consensus rules that
+/// [`TransactionData::check_v7_transaction_rules`] checks, each of which one v7
+/// transaction decides by itself.
 ///
 /// A transaction that breaks one of these rules is well-formed but invalid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,9 +206,18 @@ pub enum TransactionRuleError {
     /// The expiry height of a coinbase transaction is not the block height in its
     /// coinbase bundle.
     CoinbaseExpiryMismatch,
+    /// A coinbase transaction has an Orchard bundle. From NU6.3 a coinbase transaction
+    /// has no Orchard actions; its shielded outputs go to the Sapling or Ironwood pool.
+    CoinbaseOrchardActions,
+    /// The Orchard or Ironwood bundle of this type has neither spends nor outputs
+    /// enabled. A bundle with actions enables at least one of the two.
+    NoSpendsOrOutputs(BundleType),
     /// The Orchard pool balance is negative: the transaction moves value into the Orchard
     /// pool, which has been closed to deposits since NU6.3.
     OrchardBalanceNegative,
+    /// A transparent input has a null previous output. Only the coinbase transactions of
+    /// earlier versions have one; a v7 coinbase transaction has no transparent inputs.
+    NullPrevout,
     /// The transparent delta is below the negated total of the transparent outputs,
     /// which no spent outputs can produce, or a transaction without transparent inputs
     /// has a transparent delta that is not that negated total.
@@ -225,6 +236,14 @@ pub enum TransactionRuleError {
 impl fmt::Display for TransactionRuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::NoSpendsOrOutputs(t) => {
+                return write!(
+                    f,
+                    "the bundle of type {t} has neither spends nor outputs enabled"
+                );
+            }
+            Self::CoinbaseOrchardActions => "a coinbase transaction has Orchard actions",
+            Self::NullPrevout => "a transparent input has a null previous output",
             Self::CoinbaseFeeNegative => "a coinbase transaction has a negative fee delta",
             Self::FeePositive => "a non-coinbase transaction has a positive fee delta",
             Self::CoinbaseDeltaMismatch => {
@@ -246,28 +265,41 @@ impl fmt::Display for TransactionRuleError {
 
 impl core::error::Error for TransactionRuleError {}
 
-/// Checks the ZIP 248 value and input and output rules that one v7 transaction decides
-/// by itself, beyond the bundle-local rules that every v7 transaction already satisfies.
+/// Checks the consensus rules listed below, each of which one v7 transaction decides by
+/// itself, beyond the bundle-local rules that every v7 transaction already satisfies.
 /// Transactions of earlier versions have no such rules here.
 ///
 /// These are the ZIP 248 cross-bundle rules that need neither the block nor the spent
-/// outputs, with the rules of the protocol specification's transaction consensus rules
-/// that v7 changes the encoding of:
+/// outputs, with transaction consensus rules of the protocol specification that ZIP 248
+/// re-encodes or leaves unchanged for v7:
 ///
 /// - the fee delta is not negative in a coinbase transaction, and not positive otherwise;
 /// - in a coinbase transaction, the coinbase delta is the block subsidy less the lockbox
 ///   deposit and the fee contribution ZIP 235 removes from circulation, which is 60% of
 ///   the fee delta, rounded down, and the expiry height is the block height;
+/// - a coinbase transaction has no Orchard actions;
+/// - an Orchard or Ironwood bundle has spends or outputs enabled;
 /// - the Orchard pool balance is not negative;
+/// - no transparent input has a null previous output;
 /// - the transparent delta is at least the negated total of the transparent outputs,
 ///   and equal to it without transparent inputs;
 /// - the transaction has an input and an output;
 /// - the value pool deltas sum to zero.
 ///
 /// It does not verify proofs or signatures, or any rule on the contents of a shielded
-/// bundle. Full validators also check what needs more context: that the coinbase
-/// bundle's height, subsidy and lockbox deposit and the fee delta match the block, and
-/// the transparent delta of a transaction with transparent inputs.
+/// bundle, and it does not check the limit of 65,535 Sapling spends, Sapling outputs,
+/// and Orchard or Ironwood actions, which a transaction that fits in a block cannot
+/// exceed. It leaves double spends to the validator's sets of spent outputs and
+/// nullifiers, including a previous output or nullifier that the transaction itself
+/// repeats, and it does not cap the total value of the transparent outputs of a
+/// transaction with transparent inputs. Full validators also check what needs more
+/// context: that the coinbase bundle's height, subsidy and lockbox deposit and the fee
+/// delta match the block, and the transparent delta of a transaction with transparent
+/// inputs.
+///
+/// The coinbase delta follows ZIP 248's formula, which has no term for the value that
+/// ZIP 271 pays out of the lockbox, so a v7 coinbase transaction that makes that payout
+/// cannot balance. On the public networks the payout's height comes before v7 is valid.
 pub(crate) fn check_transaction_local_rules<A: Authorization>(
     tx: &TransactionData<A>,
 ) -> Result<(), TransactionRuleError> {
@@ -297,9 +329,32 @@ pub(crate) fn check_transaction_local_rules<A: Authorization>(
             if tx.expiry_height != coinbase.block_height() {
                 return Err(TransactionRuleError::CoinbaseExpiryMismatch);
             }
+            // > [NU6.3 onward] A coinbase transaction MUST NOT have any Orchard action
+            // > descriptions.
+            //
+            // An Orchard bundle always has an action.
+            if tx.orchard_bundle.is_some() {
+                return Err(TransactionRuleError::CoinbaseOrchardActions);
+            }
         }
         None if fee > 0 => return Err(TransactionRuleError::FeePositive),
         None => {}
+    }
+
+    // > If nActionsOrchard > 0, then at least one of enableSpendsOrchard and
+    // > enableOutputsOrchard MUST be 1.
+    //
+    // The same holds for Ironwood, and a bundle always has an action.
+    for (bundle_type, bundle) in [
+        (BundleType::ORCHARD, &tx.orchard_bundle),
+        (BundleType::IRONWOOD, &tx.ironwood_bundle),
+    ] {
+        if bundle.as_ref().is_some_and(|b| {
+            let flags = b.flags();
+            !flags.spends_enabled() && !flags.outputs_enabled()
+        }) {
+            return Err(TransactionRuleError::NoSpendsOrOutputs(bundle_type));
+        }
     }
 
     if zat(shielded.orchard) < 0 {
@@ -310,6 +365,17 @@ pub(crate) fn check_transaction_local_rules<A: Authorization>(
         .transparent_bundle
         .as_ref()
         .map_or((0, &[][..]), |bundle| (bundle.vin.len(), &bundle.vout[..]));
+    // > A transparent input in a non-coinbase transaction MUST NOT have a null prevout.
+    //
+    // A v7 coinbase transaction has no transparent inputs, so no v7 input may have one.
+    if tx.transparent_bundle.as_ref().is_some_and(|bundle| {
+        bundle
+            .vin
+            .iter()
+            .any(|input| *input.prevout() == ::transparent::bundle::OutPoint::NULL)
+    }) {
+        return Err(TransactionRuleError::NullPrevout);
+    }
     let output_total: i128 = transparent_outputs
         .iter()
         .map(|output| i128::from(output.value().into_u64()))
