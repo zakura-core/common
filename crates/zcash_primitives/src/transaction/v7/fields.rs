@@ -13,6 +13,9 @@ use super::{coinbase::CoinbaseBundle, envelope::ValuePoolDelta, registry::Bundle
 /// The shielded bundles carry their balancing values as their own value balances, so
 /// they are not repeated here. A zero delta is an absent entry.
 ///
+/// The ZIP 233 bundle has no delta here: it is registered for v7 but not active in any
+/// consensus branch this library knows, so a typed v7 transaction cannot have one.
+///
 /// It is non-exhaustive while ZIP 248 is a draft; construct it from
 /// [`ValueDeltas::default`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,8 +30,6 @@ pub struct ValueDeltas {
     /// The fee bundle's delta (ZIP 2002): the negated fee of a non-coinbase transaction,
     /// or the fees a coinbase transaction collects.
     pub fee: ZatBalance,
-    /// The ZIP 233 NSM bundle's delta.
-    pub nsm: ZatBalance,
 }
 
 impl Default for ValueDeltas {
@@ -37,7 +38,6 @@ impl Default for ValueDeltas {
             transparent: ZatBalance::zero(),
             coinbase: ZatBalance::zero(),
             fee: ZatBalance::zero(),
-            nsm: ZatBalance::zero(),
         }
     }
 }
@@ -87,7 +87,6 @@ pub(crate) fn value_pool_deltas(
         (BundleId::ORCHARD, shielded.orchard),
         (BundleId::IRONWOOD, shielded.ironwood),
         (BundleId::FEE, value_deltas.fee),
-        (BundleId::NSM, value_deltas.nsm),
     ]
     .into_iter()
     .filter_map(|(bundle, value)| {

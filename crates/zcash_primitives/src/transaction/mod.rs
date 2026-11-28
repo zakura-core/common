@@ -508,6 +508,19 @@ impl<A: Authorization> TransactionData<A> {
         self.ironwood_bundle.as_ref()
     }
 
+    /// Checks the consensus rules that a v7 transaction decides by itself: the sign of
+    /// the fee, that the value pool deltas sum to zero, that the transaction has an input
+    /// and an output, that the Orchard pool balance is not negative, that the transparent
+    /// delta of a transaction without transparent inputs matches its outputs, and that a
+    /// coinbase transaction's delta and expiry height agree with its coinbase bundle.
+    ///
+    /// Decoding does not check these rules, because a transaction that breaks one is
+    /// well-formed. Full validators call this, and then check the rules that need the
+    /// block or the spent outputs. Transactions of earlier versions always pass.
+    pub fn check_v7_transaction_rules(&self) -> Result<(), v7::TransactionRuleError> {
+        v7::check_transaction_local_rules(self)
+    }
+
     /// Returns the parts that only a v7 transaction has, or `None` for earlier versions.
     pub fn v7_fields(&self) -> Option<&v7::V7Fields> {
         self.v7.as_ref()

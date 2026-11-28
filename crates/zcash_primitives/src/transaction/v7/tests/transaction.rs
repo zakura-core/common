@@ -1163,7 +1163,6 @@ fn hand_written_bundle_lists_follow_the_registry() {
         transparent: one,
         coinbase: one,
         fee: one,
-        nsm: one,
     };
     let shielded = ShieldedBalances {
         sapling: one,
@@ -1175,7 +1174,12 @@ fn hand_written_bundle_lists_follow_the_registry() {
             .iter()
             .map(|d| d.bundle)
             .collect::<Vec<_>>(),
+        // The ZIP 233 bundle is registered but not active, so typed data has no delta
+        // for it.
         registered(|r| r.value_pool_delta)
+            .into_iter()
+            .filter(|id| *id != BundleId::NSM)
+            .collect::<Vec<_>>()
     );
 
     // The standard vector has every effecting bundle but the coinbase bundle.
@@ -1567,4 +1571,155 @@ fn v7_data_needs_its_v7_fields() {
         None,
         None,
     );
+}
+
+/// Reads the frozen vector at `index` as transaction data.
+fn vector_data(index: usize) -> TransactionData<Authorized> {
+    let tv = &super::vectors::TEST_VECTORS[index];
+    Transaction::read(&hex::decode(tv.tx.as_bytes()).unwrap()[..], BranchId::Nu7_1)
+        .unwrap()
+        .into_data()
+}
+
+fn value_deltas(tx: &mut TransactionData<Authorized>) -> &mut ValueDeltas {
+    &mut tx.v7.as_mut().unwrap().value_deltas
+}
+
+/// The frozen vectors are shaped like transactions consensus could accept, so they pass
+/// every rule that one transaction decides by itself.
+#[test]
+fn transaction_local_rules_accept_the_vectors() {
+    for index in 0..super::vectors::TEST_VECTORS.len() {
+        assert_eq!(
+            vector_data(index).check_v7_transaction_rules(),
+            Ok(()),
+            "{}",
+            super::vectors::TEST_VECTORS[index].bundles
+        );
+    }
+}
+
+#[test]
+fn transaction_local_rules_reject_each_violation() {
+    use crate::transaction::v7::TransactionRuleError as E;
+
+    let one = ZatBalance::const_from_i64(1);
+    type Edit = Box<dyn Fn(&mut TransactionData<Authorized>)>;
+    let cases: Vec<(usize, E, Edit)> = vec![
+        (
+            STANDARD,
+            E::FeePositive,
+            Box::new(move |tx| value_deltas(tx).fee = one),
+        ),
+        (
+            RICH_COINBASE,
+            E::CoinbaseFeeNegative,
+            Box::new(move |tx| value_deltas(tx).fee = -one),
+        ),
+        // One zatoshi more than the subsidy left after the lockbox deposit: a negative
+        // fee contribution.
+        (
+            MINIMAL_COINBASE,
+            E::CoinbaseDeltaOutOfRange,
+            Box::new(move |tx| {
+                let deltas = value_deltas(tx);
+                deltas.coinbase = (deltas.coinbase + one).unwrap();
+            }),
+        ),
+        // One zatoshi less: a fee contribution of one zatoshi from a block without fees.
+        (
+            MINIMAL_COINBASE,
+            E::CoinbaseDeltaOutOfRange,
+            Box::new(move |tx| {
+                let deltas = value_deltas(tx);
+                deltas.coinbase = (deltas.coinbase - one).unwrap();
+            }),
+        ),
+        (
+            MINIMAL_COINBASE,
+            E::CoinbaseExpiryMismatch,
+            Box::new(|tx| tx.expiry_height = tx.expiry_height + 1),
+        ),
+        (
+            MINIMAL_COINBASE,
+            E::TransparentDeltaMismatch,
+            Box::new(move |tx| {
+                let deltas = value_deltas(tx);
+                deltas.transparent = (deltas.transparent + one).unwrap();
+            }),
+        ),
+        // Without its coinbase bundle, the transaction only has a transparent output.
+        (
+            MINIMAL_COINBASE,
+            E::NoInputs,
+            Box::new(|tx| {
+                let fields = tx.v7.as_mut().unwrap();
+                fields.coinbase_bundle = None;
+                fields.value_deltas.coinbase = ZatBalance::zero();
+            }),
+        ),
+        // Only the transparent input is left.
+        (
+            STANDARD,
+            E::NoOutputs,
+            Box::new(|tx| {
+                tx.transparent_bundle.as_mut().unwrap().vout.clear();
+                tx.sapling_bundle = None;
+                tx.orchard_bundle = None;
+                tx.ironwood_bundle = None;
+            }),
+        ),
+        (
+            STANDARD,
+            E::Unbalanced,
+            Box::new(move |tx| {
+                let deltas = value_deltas(tx);
+                deltas.fee = (deltas.fee - one).unwrap();
+            }),
+        ),
+    ];
+    for (index, expected, edit) in cases {
+        let mut tx = vector_data(index);
+        edit(&mut tx);
+        assert_eq!(tx.check_v7_transaction_rules(), Err(expected));
+    }
+
+    // A negative Orchard balance decodes, since the transaction is well-formed.
+    let deposit = decode_edited(STANDARD, |deltas, _, _| {
+        deltas
+            .iter_mut()
+            .find(|delta| delta.bundle == BundleId::ORCHARD)
+            .unwrap()
+            .value = core::num::NonZeroI64::new(-1).unwrap();
+    })
+    .ok()
+    .expect("a negative Orchard balance is well-formed");
+    assert_eq!(
+        deposit.check_v7_transaction_rules(),
+        Err(E::OrchardBalanceNegative)
+    );
+}
+
+/// The ZIP 233 bundle is registered for v7 but not active, so a typed transaction cannot
+/// have its delta, whatever its sign. The envelope still parses and identifies it.
+#[test]
+fn typed_decoding_rejects_a_zip_233_delta() {
+    for value in [-1, 1] {
+        let add_delta = |deltas: &mut Vec<ValuePoolDelta>| {
+            deltas.push(ValuePoolDelta {
+                bundle: BundleId::NSM,
+                value: core::num::NonZeroI64::new(value).unwrap(),
+            })
+        };
+        let error = decode_edited(STANDARD, |deltas, _, _| add_delta(deltas))
+            .err()
+            .expect("the ZIP 233 bundle is not active");
+        assert!(alloc::format!("{error}").contains("not active"), "{error}");
+
+        let bytes = hex::decode(super::vectors::TEST_VECTORS[STANDARD].tx.as_bytes()).unwrap();
+        let (header, mut deltas, effects, auths) = Envelope::read(&bytes[..]).unwrap().into_parts();
+        add_delta(&mut deltas);
+        let envelope = Envelope::new(header, deltas, effects, auths).unwrap();
+        envelope.txid(|_| None).unwrap();
+    }
 }

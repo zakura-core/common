@@ -37,8 +37,8 @@ pub use envelope::{BundleData, Envelope, EnvelopeError, Header, MapKind, ValuePo
 pub(crate) use fields::{ShieldedBalances, value_pool_deltas};
 pub use fields::{V7Fields, ValueDeltas};
 pub use registry::{BundleId, BundleType, BundleVariant, Registration};
-pub use rules::BundleRuleError;
-pub(crate) use rules::conform;
+pub use rules::{BundleRuleError, TransactionRuleError};
+pub(crate) use rules::{check_transaction_local_rules, conform};
 pub use sighash_info::SIGHASH_INFO_V0;
 
 /// A v7 bundle whose signatures each sign their own digest: the Sapling, Orchard, or
