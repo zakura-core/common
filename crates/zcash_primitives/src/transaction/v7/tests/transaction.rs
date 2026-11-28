@@ -1722,8 +1722,7 @@ fn transaction_local_rules_reject_each_violation() {
     // An Orchard bundle with outputs disabled is not an output.
     const SPENDS_ONLY: u8 = 0b01;
     let mut spends_only = decode_edited(STANDARD, |_, effects, _| {
-        let orchard = position(effects, BundleType::ORCHARD);
-        *effects[orchard].data.last_mut().unwrap() = SPENDS_ONLY;
+        set_flags(effects, BundleType::ORCHARD, SPENDS_ONLY)
     })
     .expect("the flags of an Orchard bundle are not checked by decoding");
     spends_only
@@ -1735,6 +1734,54 @@ fn transaction_local_rules_reject_each_violation() {
     spends_only.sapling_bundle = None;
     spends_only.ironwood_bundle = None;
     assert_eq!(spends_only.check_v7_transaction_rules(), Err(E::NoOutputs));
+}
+
+/// The flags byte is the last byte of an Orchard or Ironwood bundle's effecting data.
+fn set_flags(effects: &mut [BundleData], bundle_type: BundleType, flags: u8) {
+    let bundle = position(effects, bundle_type);
+    *effects[bundle].data.last_mut().unwrap() = flags;
+}
+
+/// An Orchard or Ironwood bundle has actions, so it enables spends or outputs.
+#[test]
+fn transaction_local_rules_reject_a_bundle_with_neither_spends_nor_outputs() {
+    use crate::transaction::v7::TransactionRuleError as E;
+
+    for bundle_type in [BundleType::ORCHARD, BundleType::IRONWOOD] {
+        let tx = decode_edited(STANDARD, |_, effects, _| set_flags(effects, bundle_type, 0))
+            .expect("the flags of a bundle do not stop it from decoding");
+        assert_eq!(
+            tx.check_v7_transaction_rules(),
+            Err(E::NoSpendsOrOutputs(bundle_type))
+        );
+    }
+}
+
+/// From NU6.3 a coinbase transaction has no Orchard actions, even ones that only create
+/// outputs and move no value.
+#[test]
+fn transaction_local_rules_reject_orchard_actions_in_a_coinbase_transaction() {
+    use crate::transaction::v7::TransactionRuleError as E;
+
+    const OUTPUTS_ONLY: u8 = 0b10;
+    let bytes = hex::decode(super::vectors::TEST_VECTORS[STANDARD].tx.as_bytes()).unwrap();
+    let (_, _, mut effects, auths) = Envelope::read(&bytes[..]).unwrap().into_parts();
+    set_flags(&mut effects, BundleType::ORCHARD, OUTPUTS_ONLY);
+    let effect = effects[position(&effects, BundleType::ORCHARD)].clone();
+    let auth = auths[position(&auths, BundleType::ORCHARD)].clone();
+
+    // The Orchard bundle is added without a delta, so the transaction still balances.
+    let tx = decode_edited(MINIMAL_COINBASE, |_, effects, auths| {
+        effects.push(effect);
+        effects.sort_by_key(|bundle| bundle.bundle.bundle_type);
+        auths.push(auth);
+        auths.sort_by_key(|bundle| bundle.bundle.bundle_type);
+    })
+    .expect("a coinbase transaction with Orchard outputs is well-formed");
+    assert_eq!(
+        tx.check_v7_transaction_rules(),
+        Err(E::CoinbaseOrchardActions)
+    );
 }
 
 /// Moves `amount` zatoshis of the transparent transaction value pool into the first
