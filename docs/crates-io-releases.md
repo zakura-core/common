@@ -1,7 +1,7 @@
 # Crates.io releases
 
 Common releases use `.github/workflows/publish-crates.yml`, following
-[Zakura's workflow](https://github.com/zakura-core/zakura/blob/main/.github/workflows/publish-crates.yml)
+[Zakura's workflow](https://raw.githubusercontent.com/zakura-core/zakura/main/.github/workflows/publish-crates.yml)
 and [wallet-libraries' protected release](https://github.com/zakura-core/wallet-libraries/pull/183).
 Only a manual dispatch from `main` in `zakura-core/common` is allowed. Every
 checkout uses the dispatch commit, even if main advances while approval is pending.

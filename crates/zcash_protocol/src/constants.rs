@@ -41,6 +41,15 @@ pub const V6_TX_VERSION: u32 = 6;
 /// The version group ID for Zcash v6 transactions.
 pub const V6_VERSION_GROUP_ID: u32 = 0xD884B698;
 
+/// Transaction version 7, the extensible transaction format specified in
+/// [ZIP 248](https://zips.z.cash/zip-0248).
+pub const V7_TX_VERSION: u32 = 7;
+/// The version group ID for Zcash v7 transactions.
+///
+/// ZIP 248 has not assigned this value yet. This placeholder is valid only on local
+/// networks that activate NU7.1, and will change when the deployment ZIP assigns one.
+pub const V7_VERSION_GROUP_ID: u32 = 0xFFFF_FFF7;
+
 /// The maximum size in bytes of a Zcash block, and therefore the maximum size of any single
 /// transaction within one.
 ///

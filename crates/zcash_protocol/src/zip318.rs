@@ -15,7 +15,9 @@
 
 use core::num::NonZeroU32;
 
-use crate::consensus::{BlockHeight, NU7_POW_TARGET_SPACING_RATIO, NetworkUpgrade, Parameters};
+use crate::consensus::{
+    BlockHeight, NU7_POW_TARGET_SPACING_RATIO, Parameters, nu7_activation_height,
+};
 use crate::value::{COIN, Zatoshis};
 
 /// The base of the denomination scale: every denomination is a multiple of a power of this radix.
@@ -235,7 +237,7 @@ impl BlockSpacing {
     /// The spacing of the chain that `params` describe.
     pub fn for_network<P: Parameters>(params: &P) -> Self {
         Self {
-            nu7_activation: params.activation_height(NetworkUpgrade::Nu7),
+            nu7_activation: nu7_activation_height(params),
         }
     }
 

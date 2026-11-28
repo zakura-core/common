@@ -32,6 +32,7 @@ use crate::consensus::{BlockHeight, NetworkType, NetworkUpgrade, Parameters};
 ///         nu6_2: Some(BlockHeight::from_u32(1)),
 ///         nu6_3: Some(BlockHeight::from_u32(1)),
 ///         nu7: Some(BlockHeight::from_u32(1)),
+///         nu7_1: None,
 ///     };
 ///     ```
 ///
@@ -48,6 +49,7 @@ pub struct LocalNetwork {
     pub nu6_2: Option<BlockHeight>,
     pub nu6_3: Option<BlockHeight>,
     pub nu7: Option<BlockHeight>,
+    pub nu7_1: Option<BlockHeight>,
 }
 
 /// Parameters implementation for `LocalNetwork`
@@ -69,6 +71,7 @@ impl Parameters for LocalNetwork {
             NetworkUpgrade::Nu6_2 => self.nu6_2,
             NetworkUpgrade::Nu6_3 => self.nu6_3,
             NetworkUpgrade::Nu7 => self.nu7,
+            NetworkUpgrade::Nu7_1 => self.nu7_1,
         }
     }
 }
@@ -107,6 +110,7 @@ mod tests {
             nu6_2: Some(expected_nu6_2),
             nu6_3: Some(expected_nu6_3),
             nu7: Some(expected_nu7),
+            nu7_1: None,
         };
 
         assert!(regtest.is_nu_active(NetworkUpgrade::Overwinter, expected_overwinter));
@@ -149,6 +153,7 @@ mod tests {
             nu6_2: Some(expected_nu6_2),
             nu6_3: Some(expected_nu6_3),
             nu7: Some(expected_nu7),
+            nu7_1: None,
         };
 
         assert_eq!(
@@ -223,6 +228,7 @@ mod tests {
             nu6_2: Some(expected_nu6_2),
             nu6_3: Some(expected_nu6_3),
             nu7: Some(expected_nu7),
+            nu7_1: None,
         };
 
         assert_eq!(regtest.coin_type(), constants::regtest::COIN_TYPE);

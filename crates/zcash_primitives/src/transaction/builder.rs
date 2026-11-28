@@ -69,7 +69,7 @@ pub fn default_tx_expiry_delta<P: consensus::Parameters>(
     params: &P,
     target_height: BlockHeight,
 ) -> u32 {
-    if params.is_nu_active(consensus::NetworkUpgrade::Nu7, target_height) {
+    if consensus::nu7_activation_height(params).is_some_and(|h| h <= target_height) {
         NU7_DEFAULT_TX_EXPIRY_DELTA
     } else {
         PRE_NU7_DEFAULT_TX_EXPIRY_DELTA
@@ -87,7 +87,7 @@ pub fn check_shielded_budget<P: consensus::Parameters>(
     orchard_actions: usize,
     ironwood_actions: usize,
 ) -> Result<(), &'static str> {
-    if !params.is_nu_active(consensus::NetworkUpgrade::Nu7, target_height) {
+    if consensus::nu7_activation_height(params).is_none_or(|h| target_height < h) {
         return Ok(());
     }
     let sapling = sapling_spends
@@ -965,9 +965,10 @@ impl<P, U> Builder<P, U> {
 
         {
             // Ironwood is available only when the target version carries an Ironwood bundle
-            // (V6) and the consensus branch is one in which Ironwood is active.
+            // and the consensus branch is one in which Ironwood is active.
             let ironwood_branch =
-                matches!(self.consensus_branch_id, BranchId::Nu6_3 | BranchId::Nu7);
+                bundle_version_for_branch(self.consensus_branch_id, orchard::ValuePool::Ironwood)
+                    .is_some();
             let ironwood_available = version.has_ironwood() && ironwood_branch;
             if !ironwood_available && self.ironwood_in_use() {
                 return Err(Error::TargetIncompatible(
@@ -2056,6 +2057,37 @@ mod tests {
 
     #[test]
     #[cfg(feature = "circuits")]
+    fn nu7_policy_starts_at_the_first_nu7_or_later_upgrade() {
+        use zcash_protocol::zip318::BlockSpacing;
+
+        let activation = 12u32.into();
+        for (nu7, nu7_1) in [
+            (None, Some(activation)),
+            (Some(activation), Some(activation)),
+            (Some(activation), Some(activation + 1)),
+            (Some(activation + 1), Some(activation)),
+        ] {
+            let mut network = nu7_test_network();
+            network.nu7 = nu7;
+            network.nu7_1 = nu7_1;
+            let spacing = BlockSpacing::for_network(&network);
+            for (height, expiry, ratio, within_budget) in [
+                (activation - 1, 40, 1, true),
+                (activation, 120, 3, false),
+                (activation + 1, 120, 3, false),
+            ] {
+                assert_eq!(super::default_tx_expiry_delta(&network, height), expiry);
+                assert_eq!(spacing.blocks_per_reference_block(height), ratio);
+                assert_eq!(
+                    super::check_shielded_budget(&network, height, 0, 0, 331, 0).is_ok(),
+                    within_budget
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "circuits")]
     fn nu7_shielded_budget_boundaries() {
         // Pin the ZIP 218 limits independently of the constants used by the checker.
         assert_eq!(zcash_protocol::consensus::NU7_SAPLING_BLOCK_IO_LIMIT, 300);
@@ -2305,6 +2337,7 @@ mod tests {
             nu6_2: Some(BlockHeight::from_u32(9)),
             nu6_3: Some(BlockHeight::from_u32(10)),
             nu7: None,
+            nu7_1: None,
         }
     }
 
@@ -2324,6 +2357,7 @@ mod tests {
             nu6_2: Some(BlockHeight::from_u32(9)),
             nu6_3: Some(BlockHeight::from_u32(10)),
             nu7: Some(BlockHeight::from_u32(11)),
+            nu7_1: None,
         }
     }
 
@@ -2584,6 +2618,45 @@ mod tests {
             )
             .unwrap();
 
+        assert_matches!(
+            builder.build_for_pczt(
+                thread_rng(),
+                &crate::transaction::fees::zip317::FeeRule::standard(),
+            ),
+            Err(Error::InsufficientFunds(_))
+        );
+    }
+
+    #[test]
+    #[cfg(all(feature = "circuits", feature = "pczt"))]
+    fn build_for_pczt_accepts_ironwood_under_nu7_1() {
+        let mut network = nu7_test_network();
+        network.nu7_1 = Some(12u32.into());
+        let mut builder = Builder::new(
+            network,
+            12u32.into(),
+            BuildConfig::Standard {
+                sapling_anchor: None,
+                orchard_anchor: None,
+                ironwood_anchor: Some(orchard::Anchor::empty_tree()),
+                orchard_padding: BundlePadding::DEFAULT,
+                ironwood_padding: BundlePadding::DEFAULT,
+            },
+        );
+        let recipient = orchard::keys::FullViewingKey::from(
+            &orchard::keys::SpendingKey::from_bytes([0; 32]).unwrap(),
+        )
+        .address_at(0u32, orchard::keys::Scope::External);
+        builder
+            .add_ironwood_output::<crate::transaction::fees::zip317::FeeRule>(
+                None,
+                recipient,
+                Zatoshis::const_from_u64(10_000),
+                MemoBytes::empty(),
+            )
+            .unwrap();
+
+        // The Ironwood output is accepted; only the missing funds stop the build.
         assert_matches!(
             builder.build_for_pczt(
                 thread_rng(),
