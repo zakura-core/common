@@ -17,6 +17,9 @@
 //! [ZIP 248]: https://zips.z.cash/zip-0248
 
 mod bundle_digests;
+/// Largest block or expiry height representable in a typed v7 transaction.
+pub(crate) const MAX_V7_HEIGHT: u32 = 499_999_999;
+
 mod coinbase;
 pub(crate) mod digest;
 mod envelope;

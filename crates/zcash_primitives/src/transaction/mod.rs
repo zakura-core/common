@@ -436,7 +436,8 @@ impl<A: Authorization> TransactionData<A> {
     /// as for [`TransactionData::from_parts_v6`]. A transparent bundle with neither inputs
     /// nor outputs is dropped, since v7 encodes it by omitting it.
     ///
-    /// Returns an error if v7 is unavailable in the consensus branch or if the parts
+    /// Returns an error if v7 is unavailable in the consensus branch, the expiry height exceeds
+    /// 499,999,999, or the parts
     /// violate a ZIP 248 bundle-local rule: a transparent or coinbase value pool delta
     /// without its bundle, a coinbase transaction that spends, Sapling spends with
     /// different anchors, or an Orchard or Ironwood bundle with the wrong version for this
@@ -1366,7 +1367,7 @@ pub mod testing {
             version in arb_tx_version(consensus_branch_id)
         )(
             lock_time in any::<u32>(),
-            expiry_height in any::<u32>(),
+            expiry_height in 0..=if version == TxVersion::V7 { super::v7::MAX_V7_HEIGHT } else { u32::MAX },
             transparent_bundle in transparent::arb_bundle(),
             sapling_bundle in sapling::arb_bundle_for_version(version),
             orchard_bundle in orchard::arb_bundle_for_version(version),

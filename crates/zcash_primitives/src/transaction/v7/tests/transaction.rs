@@ -1189,6 +1189,40 @@ fn hand_written_bundle_lists_follow_the_registry() {
 }
 
 #[test]
+fn typed_expiry_height_boundaries() {
+    let bytes = hex::decode(super::vectors::TEST_VECTORS[MINIMAL_COINBASE].tx).unwrap();
+    let tx = Transaction::read(&bytes[..], BranchId::Nu7_1).unwrap();
+    let (header, deltas, effects, auth) = Envelope::read(&bytes[..]).unwrap().into_parts();
+    for (height, accepted) in [(0, true), (499_999_999, true), (500_000_000, false)] {
+        let made = TransactionData::<Authorized>::from_parts_v7(
+            BranchId::Nu7_1,
+            tx.lock_time(),
+            height.into(),
+            tx.transparent_bundle().cloned(),
+            None,
+            None,
+            None,
+            tx.v7_fields().unwrap().clone(),
+        );
+        assert_eq!(
+            made.err(),
+            (!accepted).then_some(crate::transaction::v7::BundleRuleError::ExpiryHeightOutOfRange)
+        );
+        let mut edited = Vec::new();
+        let mut header = header;
+        header.expiry_height = height;
+        Envelope::new(header, deltas.clone(), effects.clone(), auth.clone())
+            .unwrap()
+            .write(&mut edited)
+            .unwrap();
+        assert_eq!(
+            Transaction::read(&edited[..], BranchId::Nu7_1).is_ok(),
+            accepted
+        );
+    }
+}
+
+#[test]
 fn v7_is_rejected_outside_nu7_1() {
     let bytes = hex::decode(super::vectors::TEST_VECTORS[MINIMAL_COINBASE].tx.as_bytes()).unwrap();
     let coinbase = Transaction::read(&bytes[..], BranchId::Nu7_1).unwrap();

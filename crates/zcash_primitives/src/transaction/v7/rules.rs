@@ -24,6 +24,8 @@ use crate::transaction::{
 pub enum BundleRuleError {
     /// The transaction version is unavailable in this consensus branch.
     UnsupportedBranch(BranchId),
+    /// The expiry height exceeds the v7 height range.
+    ExpiryHeightOutOfRange,
     /// Sapling spends have different anchors, but v7 encodes a single shared anchor.
     MixedSaplingAnchors,
     /// A value pool delta has no effecting bundle of its type.
@@ -41,6 +43,7 @@ pub enum BundleRuleError {
 impl fmt::Display for BundleRuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ExpiryHeightOutOfRange => f.write_str("v7 expiry height is out of range"),
             Self::MixedSaplingAnchors => f.write_str("v7 Sapling spends must share an anchor"),
             Self::UnsupportedBranch(branch) => write!(
                 f,
@@ -95,6 +98,9 @@ pub(crate) fn check_bundle_local_rules<A: Authorization>(
     };
     if !tx.version.valid_in_branch(tx.consensus_branch_id) {
         return Err(BundleRuleError::UnsupportedBranch(tx.consensus_branch_id));
+    }
+    if u32::from(tx.expiry_height()) > super::MAX_V7_HEIGHT {
+        return Err(BundleRuleError::ExpiryHeightOutOfRange);
     }
     if tx.sapling_bundle().is_some_and(|bundle| {
         bundle

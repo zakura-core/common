@@ -20,9 +20,6 @@ const COINBASE_PERSONALIZATION: &[u8; 16] = b"ZTxIdCoinbasHash";
 /// The maximum length of `coinbaseData`.
 pub const MAX_COINBASE_DATA_LEN: usize = 94;
 
-/// The largest `blockHeight` a coinbase bundle can carry.
-const MAX_BLOCK_HEIGHT: u32 = 499_999_999;
-
 /// A miner's signal on one subject of a poll.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MinerSignal {
@@ -135,7 +132,7 @@ impl CoinbaseBundle {
         coinbase_data: Vec<u8>,
         miner_poll: Option<MinerPoll>,
     ) -> Result<Self, CoinbaseError> {
-        if !(1..=MAX_BLOCK_HEIGHT).contains(&u32::from(block_height)) {
+        if !(1..=super::MAX_V7_HEIGHT).contains(&u32::from(block_height)) {
             return Err(CoinbaseError::BlockHeightOutOfRange);
         }
         if lockbox_value > block_subsidy {
