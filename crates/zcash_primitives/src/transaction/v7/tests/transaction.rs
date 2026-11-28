@@ -1616,20 +1616,20 @@ fn transaction_local_rules_reject_each_violation() {
             E::CoinbaseFeeNegative,
             Box::new(move |tx| value_deltas(tx).fee = -one),
         ),
-        // One zatoshi more than the subsidy left after the lockbox deposit: a negative
-        // fee contribution.
+        // This block has no fees, so the coinbase delta is exactly the subsidy left after
+        // the lockbox deposit. One zatoshi more:
         (
             MINIMAL_COINBASE,
-            E::CoinbaseDeltaOutOfRange,
+            E::CoinbaseDeltaMismatch,
             Box::new(move |tx| {
                 let deltas = value_deltas(tx);
                 deltas.coinbase = (deltas.coinbase + one).unwrap();
             }),
         ),
-        // One zatoshi less: a fee contribution of one zatoshi from a block without fees.
+        // One zatoshi less:
         (
             MINIMAL_COINBASE,
-            E::CoinbaseDeltaOutOfRange,
+            E::CoinbaseDeltaMismatch,
             Box::new(move |tx| {
                 let deltas = value_deltas(tx);
                 deltas.coinbase = (deltas.coinbase - one).unwrap();
@@ -1648,14 +1648,17 @@ fn transaction_local_rules_reject_each_violation() {
                 deltas.transparent = (deltas.transparent + one).unwrap();
             }),
         ),
-        // Without its coinbase bundle, the transaction only has a transparent output.
+        // Without its coinbase bundle, the transaction only has outputs: its Sapling
+        // bundle has no spends, and its Ironwood bundle has spends disabled.
         (
-            MINIMAL_COINBASE,
+            RICH_COINBASE,
             E::NoInputs,
             Box::new(|tx| {
                 let fields = tx.v7.as_mut().unwrap();
                 fields.coinbase_bundle = None;
                 fields.value_deltas.coinbase = ZatBalance::zero();
+                // Only a coinbase transaction collects fees.
+                fields.value_deltas.fee = ZatBalance::zero();
             }),
         ),
         // Only the transparent input is left.
@@ -1667,6 +1670,24 @@ fn transaction_local_rules_reject_each_violation() {
                 tx.sapling_bundle = None;
                 tx.orchard_bundle = None;
                 tx.ironwood_bundle = None;
+            }),
+        ),
+        // With inputs, the spent outputs are worth at least nothing, so the delta cannot
+        // be below the negated total of the created outputs.
+        (
+            STANDARD,
+            E::TransparentDeltaMismatch,
+            Box::new(move |tx| {
+                let outputs: u64 = tx
+                    .transparent_bundle
+                    .as_ref()
+                    .unwrap()
+                    .vout
+                    .iter()
+                    .map(|output| output.value().into_u64())
+                    .sum();
+                value_deltas(tx).transparent =
+                    ZatBalance::from_i64(-i64::try_from(outputs).unwrap() - 1).unwrap();
             }),
         ),
         (
@@ -1697,6 +1718,102 @@ fn transaction_local_rules_reject_each_violation() {
         deposit.check_v7_transaction_rules(),
         Err(E::OrchardBalanceNegative)
     );
+
+    // An Orchard bundle with outputs disabled is not an output.
+    const SPENDS_ONLY: u8 = 0b01;
+    let mut spends_only = decode_edited(STANDARD, |_, effects, _| {
+        let orchard = position(effects, BundleType::ORCHARD);
+        *effects[orchard].data.last_mut().unwrap() = SPENDS_ONLY;
+    })
+    .expect("the flags of an Orchard bundle are not checked by decoding");
+    spends_only
+        .transparent_bundle
+        .as_mut()
+        .unwrap()
+        .vout
+        .clear();
+    spends_only.sapling_bundle = None;
+    spends_only.ironwood_bundle = None;
+    assert_eq!(spends_only.check_v7_transaction_rules(), Err(E::NoOutputs));
+}
+
+/// Moves `amount` zatoshis of the transparent transaction value pool into the first
+/// transparent output of `tx`, or out of it for a negative amount, keeping its
+/// transparent delta consistent.
+fn pay_more_to_first_output(tx: &mut TransactionData<Authorized>, amount: i64) {
+    let deltas = value_deltas(tx);
+    deltas.transparent = (deltas.transparent - ZatBalance::from_i64(amount).unwrap()).unwrap();
+    let output = &mut tx.transparent_bundle.as_mut().unwrap().vout[0];
+    let value = i64::try_from(output.value().into_u64()).unwrap() + amount;
+    *output = transparent::TxOut::new(
+        Zatoshis::from_nonnegative_i64(value).unwrap(),
+        output.script_pubkey().clone(),
+    );
+}
+
+/// ZIP 235 removes 60% of a block's fees from circulation, rounded down, and the coinbase
+/// delta states exactly that contribution.
+#[test]
+fn coinbase_delta_states_the_exact_zip_235_contribution() {
+    use crate::transaction::v7::TransactionRuleError as E;
+
+    let fee = i64::from(vector_data(RICH_COINBASE).v7.unwrap().value_deltas.fee);
+    let contribution = |fee: i64| 6 * fee / 10;
+    assert!(fee > 0, "the vector collects fees");
+
+    // The miner keeps all the fees: the transaction balances, but contributes nothing.
+    let mut keeps_all_fees = vector_data(RICH_COINBASE);
+    let kept = contribution(fee);
+    let deltas = value_deltas(&mut keeps_all_fees);
+    deltas.coinbase = (deltas.coinbase + ZatBalance::from_i64(kept).unwrap()).unwrap();
+    pay_more_to_first_output(&mut keeps_all_fees, kept);
+    assert_eq!(
+        keeps_all_fees.check_v7_transaction_rules(),
+        Err(E::CoinbaseDeltaMismatch)
+    );
+
+    // Nine more zatoshis of fees raise the contribution by five, since 60% of nine
+    // rounds down, and the miner's share by four.
+    const MORE_FEES: i64 = 9;
+    let more = contribution(fee + MORE_FEES) - contribution(fee);
+    assert_eq!(
+        fee % 10,
+        0,
+        "the rounding below assumes a fee that 60% divides"
+    );
+    assert_eq!(more, 5);
+    let mut rounded_down = vector_data(RICH_COINBASE);
+    let deltas = value_deltas(&mut rounded_down);
+    deltas.fee = (deltas.fee + ZatBalance::from_i64(MORE_FEES).unwrap()).unwrap();
+    deltas.coinbase = (deltas.coinbase - ZatBalance::from_i64(more).unwrap()).unwrap();
+    pay_more_to_first_output(&mut rounded_down, MORE_FEES - more);
+    assert_eq!(rounded_down.check_v7_transaction_rules(), Ok(()));
+
+    // Rounding the contribution up instead is rejected.
+    let mut rounded_up = rounded_down.clone();
+    let deltas = value_deltas(&mut rounded_up);
+    deltas.coinbase = (deltas.coinbase - ZatBalance::const_from_i64(1)).unwrap();
+    pay_more_to_first_output(&mut rounded_up, -1);
+    assert_eq!(
+        rounded_up.check_v7_transaction_rules(),
+        Err(E::CoinbaseDeltaMismatch)
+    );
+}
+
+/// Transactions of earlier versions have none of these rules.
+#[test]
+fn transaction_local_rules_accept_earlier_versions() {
+    let v5 = TransactionData::<Authorized>::from_parts(
+        TxVersion::V5,
+        BranchId::Nu5,
+        0,
+        BlockHeight::from_u32(0),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert_eq!(v5.check_v7_transaction_rules(), Ok(()));
 }
 
 /// The ZIP 233 bundle is registered for v7 but not active, so a typed transaction cannot
@@ -1712,7 +1829,10 @@ fn typed_decoding_rejects_a_zip_233_delta() {
         };
         let error = decode_edited(STANDARD, |deltas, _, _| add_delta(deltas))
             .expect_err("the ZIP 233 bundle is not active");
-        assert!(alloc::format!("{error}").contains("not active"), "{error}");
+        assert!(
+            alloc::format!("{error}").contains("bundle type 6 is not active"),
+            "{error}"
+        );
 
         let bytes = hex::decode(super::vectors::TEST_VECTORS[STANDARD].tx.as_bytes()).unwrap();
         let (header, mut deltas, effects, auths) = Envelope::read(&bytes[..]).unwrap().into_parts();

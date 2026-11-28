@@ -13,8 +13,8 @@ use super::{coinbase::CoinbaseBundle, envelope::ValuePoolDelta, registry::Bundle
 /// The shielded bundles carry their balancing values as their own value balances, so
 /// they are not repeated here. A zero delta is an absent entry.
 ///
-/// The ZIP 233 bundle has no delta here: it is registered for v7 but not active in any
-/// consensus branch this library knows, so a typed v7 transaction cannot have one.
+/// The ZIP 233 bundle has no delta here: it is registered for v7, but this library
+/// assumes that NU7.1 does not activate it, so a typed v7 transaction cannot have one.
 ///
 /// It is non-exhaustive while ZIP 248 is a draft; construct it from
 /// [`ValueDeltas::default`].

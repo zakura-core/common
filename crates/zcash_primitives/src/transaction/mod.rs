@@ -442,7 +442,9 @@ impl<A: Authorization> TransactionData<A> {
     /// without its bundle, a coinbase transaction that spends, Sapling spends with
     /// different anchors, or an Orchard or Ironwood bundle with the wrong version for this
     /// consensus branch. The rules that relate the values of the bundles to each other or to the
-    /// chain, such as the balance of the value pool deltas, are left to full validators.
+    /// chain, such as the balance of the value pool deltas, are left to full validators;
+    /// [`TransactionData::check_v7_transaction_rules`] checks those that need only the
+    /// transaction.
     ///
     /// [ZIP 248]: https://zips.z.cash/zip-0248
     #[allow(clippy::too_many_arguments)]
@@ -508,14 +510,16 @@ impl<A: Authorization> TransactionData<A> {
         self.ironwood_bundle.as_ref()
     }
 
-    /// Checks the consensus rules that a v7 transaction decides by itself: the sign of
-    /// the fee, that the value pool deltas sum to zero, that the transaction has an input
-    /// and an output, that the Orchard pool balance is not negative, that the transparent
-    /// delta of a transaction without transparent inputs matches its outputs, and that a
-    /// coinbase transaction's delta and expiry height agree with its coinbase bundle.
+    /// Checks the ZIP 248 value rules that a v7 transaction decides by itself: the sign
+    /// of the fee, that the value pool deltas sum to zero, that the transaction has an
+    /// input and an output, that the Orchard pool balance is not negative, that the
+    /// transparent delta is consistent with the transparent outputs, and that a coinbase
+    /// transaction's expiry height is its block height and its coinbase delta is the
+    /// block subsidy less the lockbox deposit and the ZIP 235 fee contribution.
     ///
-    /// Decoding does not check these rules, because a transaction that breaks one is
-    /// well-formed. Full validators call this, and then check the rules that need the
+    /// It does not verify proofs or signatures, or any rule on the contents of a shielded
+    /// bundle. Decoding does not check these rules, because a transaction that breaks one
+    /// is well-formed. Full validators call this, and then check the rules that need the
     /// block or the spent outputs. Transactions of earlier versions always pass.
     pub fn check_v7_transaction_rules(&self) -> Result<(), v7::TransactionRuleError> {
         v7::check_transaction_local_rules(self)

@@ -24,7 +24,8 @@ use crate::transaction::{
     Authorization, TransactionData, components::orchard::bundle_version_for_branch,
 };
 
-/// A violation of a ZIP 248 bundle-local rule by the parts of a v7 transaction.
+/// A violation of a ZIP 248 bundle-local rule by the parts of a v7 transaction, or a
+/// bundle that typed v7 data cannot hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum BundleRuleError {
@@ -37,7 +38,10 @@ pub enum BundleRuleError {
     /// A value pool delta has no effecting bundle of its type.
     DeltaWithoutBundle(BundleType),
     /// A bundle is registered for v7 but not active in the transaction's consensus
-    /// branch. No branch activates the ZIP 233 bundle.
+    /// branch, so typed data has no place for it. This library assumes that NU7.1 does
+    /// not activate the ZIP 233 bundle. Only decoding returns this error. Unlike the
+    /// other variants it is a bundle availability rule, which ZIP 248 leaves out of
+    /// parsing: [`Envelope`](super::Envelope) still reads such a transaction.
     InactiveBundle(BundleType),
     /// A coinbase transaction spends from the pool of this bundle type: it has
     /// transparent inputs, Sapling spends, or an Orchard or Ironwood bundle with spends
@@ -194,17 +198,18 @@ pub enum TransactionRuleError {
     /// its fee out of the transparent transaction value pool, so the delta is zero or
     /// negative.
     FeePositive,
-    /// The coinbase delta is not the block subsidy less the lockbox deposit and a ZIP 235
-    /// fee contribution between zero and the collected fees.
-    CoinbaseDeltaOutOfRange,
+    /// The coinbase delta is not the block subsidy less the lockbox deposit and the
+    /// ZIP 235 fee contribution, which is 60% of the collected fees, rounded down.
+    CoinbaseDeltaMismatch,
     /// The expiry height of a coinbase transaction is not the block height in its
     /// coinbase bundle.
     CoinbaseExpiryMismatch,
     /// The Orchard pool balance is negative: the transaction moves value into the Orchard
     /// pool, which has been closed to deposits since NU6.3.
     OrchardBalanceNegative,
-    /// A transaction without transparent inputs has a transparent delta that is not the
-    /// negated total of its transparent outputs.
+    /// The transparent delta is below the negated total of the transparent outputs,
+    /// which no spent outputs can produce, or a transaction without transparent inputs
+    /// has a transparent delta that is not that negated total.
     TransparentDeltaMismatch,
     /// The transaction has no input: no coinbase bundle, transparent input, or Sapling
     /// spend, and no Orchard or Ironwood bundle with spends enabled.
@@ -222,7 +227,7 @@ impl fmt::Display for TransactionRuleError {
         f.write_str(match self {
             Self::CoinbaseFeeNegative => "a coinbase transaction has a negative fee delta",
             Self::FeePositive => "a non-coinbase transaction has a positive fee delta",
-            Self::CoinbaseDeltaOutOfRange => {
+            Self::CoinbaseDeltaMismatch => {
                 "the coinbase delta does not match the block subsidy, lockbox deposit and fees"
             }
             Self::CoinbaseExpiryMismatch => {
@@ -241,7 +246,7 @@ impl fmt::Display for TransactionRuleError {
 
 impl core::error::Error for TransactionRuleError {}
 
-/// Checks the consensus rules that one v7 transaction decides by itself, beyond the
+/// Checks the ZIP 248 value rules that one v7 transaction decides by itself, beyond the
 /// bundle-local rules that every v7 transaction already satisfies. Transactions of
 /// earlier versions have no such rules here.
 ///
@@ -250,18 +255,19 @@ impl core::error::Error for TransactionRuleError {}
 /// that v7 changes the encoding of:
 ///
 /// - the fee delta is not negative in a coinbase transaction, and not positive otherwise;
-/// - in a coinbase transaction, the block subsidy less the lockbox deposit and the
-///   coinbase delta, which is the fee contribution ZIP 235 removes from circulation, is
-///   between zero and the collected fees, and the expiry height is the block height;
+/// - in a coinbase transaction, the coinbase delta is the block subsidy less the lockbox
+///   deposit and the fee contribution ZIP 235 removes from circulation, which is 60% of
+///   the fee delta, rounded down, and the expiry height is the block height;
 /// - the Orchard pool balance is not negative;
-/// - without transparent inputs, the transparent delta is the negated total of the
-///   transparent outputs;
+/// - the transparent delta is at least the negated total of the transparent outputs,
+///   and equal to it without transparent inputs;
 /// - the transaction has an input and an output;
 /// - the value pool deltas sum to zero.
 ///
-/// Full validators still check what needs more context: that the coinbase bundle
-/// matches its block's height, subsidy, lockbox deposit and fees, the exact ZIP 235
-/// contribution, and the transparent delta of a transaction with transparent inputs.
+/// It does not verify proofs or signatures, or any rule on the contents of a shielded
+/// bundle. Full validators also check what needs more context: that the coinbase
+/// bundle's height, subsidy and lockbox deposit and the fee delta match the block, and
+/// the transparent delta of a transaction with transparent inputs.
 pub(crate) fn check_transaction_local_rules<A: Authorization>(
     tx: &TransactionData<A>,
 ) -> Result<(), TransactionRuleError> {
@@ -278,11 +284,15 @@ pub(crate) fn check_transaction_local_rules<A: Authorization>(
             if fee < 0 {
                 return Err(TransactionRuleError::CoinbaseFeeNegative);
             }
-            let fee_contribution = i128::from(coinbase.block_subsidy().into_u64())
+            // ZIP 235: `NSMFeeContribution = floor(6 * TransactionFees / 10)`, in force
+            // from NU7, which precedes every branch that permits v7. The fee delta of a
+            // coinbase transaction is its block's `TransactionFees`.
+            let fee_contribution = 6 * fee / 10;
+            let expected = i128::from(coinbase.block_subsidy().into_u64())
                 - i128::from(coinbase.lockbox_value().into_u64())
-                - zat(deltas.coinbase);
-            if !(0..=fee).contains(&fee_contribution) {
-                return Err(TransactionRuleError::CoinbaseDeltaOutOfRange);
+                - fee_contribution;
+            if zat(deltas.coinbase) != expected {
+                return Err(TransactionRuleError::CoinbaseDeltaMismatch);
             }
             if tx.expiry_height != coinbase.block_height() {
                 return Err(TransactionRuleError::CoinbaseExpiryMismatch);
@@ -304,7 +314,12 @@ pub(crate) fn check_transaction_local_rules<A: Authorization>(
         .iter()
         .map(|output| i128::from(output.value().into_u64()))
         .sum();
-    if transparent_inputs == 0 && zat(deltas.transparent) != -output_total {
+    // The delta is the value of the spent outputs, which is not negative, less the
+    // value of the created outputs.
+    let transparent_delta = zat(deltas.transparent);
+    if transparent_delta < -output_total
+        || (transparent_inputs == 0 && transparent_delta != -output_total)
+    {
         return Err(TransactionRuleError::TransparentDeltaMismatch);
     }
 

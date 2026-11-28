@@ -2,8 +2,9 @@
 //!
 //! [`TransactionData`] represents the bundles ZIP 248 registers. Decoding rejects a
 //! transaction it cannot represent: one with an unregistered pair, an entry in a map
-//! the registry forbids for that pair, a registered bundle that its consensus branch does
-//! not activate (the ZIP 233 bundle), a bundle without the authorizing data it needs, or
+//! the registry forbids for that pair, a registered bundle that its consensus branch is
+//! assumed not to activate (the ZIP 233 bundle), a bundle without the authorizing data it
+//! needs, or
 //! a signature that does not use sighash variant 0. Such a transaction can still be
 //! parsed with [`Envelope::read`], and identified with [`Envelope::txid`].
 //!
@@ -73,8 +74,8 @@ fn from_envelope(envelope: Envelope) -> io::Result<TransactionData<Authorized>> 
             BundleId::ORCHARD => &mut shielded.orchard,
             BundleId::IRONWOOD => &mut shielded.ironwood,
             BundleId::FEE => &mut value_deltas.fee,
-            // ZIP 233 registers this bundle, but no consensus branch that permits v7
-            // activates it, and a positive delta would create value.
+            // ZIP 233 registers this bundle, but NU7.1 is assumed not to activate it, and
+            // a positive delta would create value.
             BundleId::NSM => {
                 return Err(rule_violation(BundleRuleError::InactiveBundle(
                     delta.bundle.bundle_type,
