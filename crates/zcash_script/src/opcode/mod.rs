@@ -577,12 +577,12 @@ impl Operation {
     }
 
     #[cfg(feature = "signature-validation")]
-    fn is_sig_valid(
+    pub(crate) fn is_sig_valid<C: interpreter::SignatureChecker + ?Sized>(
         vch_sig: &[u8],
         vch_pub_key: &[u8],
         flags: interpreter::Flags,
         script: &script::Code,
-        checker: &dyn interpreter::SignatureChecker,
+        checker: &C,
     ) -> Result<bool, interpreter::Error> {
         // Note how this makes the exact order of pubkey/signature evaluation distinguishable by
         // CHECKMULTISIG NOT if the STRICTENC flag is set. See the script_(in)valid tests for details.
@@ -605,12 +605,12 @@ impl Operation {
     }
 
     #[cfg(not(feature = "signature-validation"))]
-    fn is_sig_valid(
+    pub(crate) fn is_sig_valid<C: interpreter::SignatureChecker + ?Sized>(
         _vch_sig: &[u8],
         _vch_pub_key: &[u8],
         _flags: interpreter::Flags,
         _script: &script::Code,
-        _checker: &dyn interpreter::SignatureChecker,
+        _checker: &C,
     ) -> Result<bool, interpreter::Error> {
         Ok(false)
     }
@@ -958,8 +958,9 @@ impl Operation {
                 let vch_pub_key = state.stack.pop()?;
                 let vch_sig = state.stack.pop()?;
 
-                Self::is_sig_valid(&vch_sig, &vch_pub_key, flags, script, checker).and_then(
-                    |success| {
+                checker
+                    .check_signature(&vch_sig, &vch_pub_key, flags, script)
+                    .and_then(|success| {
                         if self == &Self::OP_CHECKSIGVERIFY {
                             if success {
                                 Ok(())
@@ -969,8 +970,7 @@ impl Operation {
                         } else {
                             Ok(state.stack.push(Self::cast_from_bool(success)))
                         }
-                    },
-                )
+                    })
             }
 
             // ([sig ...] num_of_signatures [pubkey ...] num_of_pubkeys -- bool)
@@ -1011,8 +1011,7 @@ impl Operation {
                     let vch_pub_key = state.stack.rget(usize::from(ikey))?;
 
                     // Check signature
-                    let ok: bool =
-                        Self::is_sig_valid(vch_sig, vch_pub_key, flags, script, checker)?;
+                    let ok: bool = checker.check_signature(vch_sig, vch_pub_key, flags, script)?;
 
                     if ok {
                         isig += 1;

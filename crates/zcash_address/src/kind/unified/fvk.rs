@@ -67,6 +67,9 @@ impl TryFrom<(u32, &[u8])> for Fvk {
         match typecode.try_into()? {
             Typecode::P2pkh => data.try_into().map(Fvk::P2pkh),
             Typecode::P2sh => Err(data),
+            // A hash-based public key cannot be derived without the secret that generates it,
+            // so there is nothing a viewing key could hold for a PQ receiver.
+            Typecode::PqTransparent(_) => Err(data),
             Typecode::Sapling => data.try_into().map(Fvk::Sapling),
             Typecode::Orchard => data.try_into().map(Fvk::Orchard),
             Typecode::Unknown(_) => Ok(Fvk::Unknown { typecode, data }),

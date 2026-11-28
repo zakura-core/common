@@ -20,6 +20,8 @@ pub mod num;
 pub mod op;
 pub mod opcode;
 pub mod pattern;
+#[cfg(feature = "pq")]
+pub mod pq;
 pub mod pv;
 pub mod script;
 pub mod signature;
@@ -240,6 +242,9 @@ pub mod testing {
     /// Ensures that flags represent a supported state. This avoids crashes in the C++ code, which
     /// break various tests.
     pub fn repair_flags(flags: interpreter::Flags) -> interpreter::Flags {
+        // The C++ implementation has no post-quantum namespace rule, so a comparison against
+        // it must never set this flag, or the two sides disagree by construction.
+        let flags = flags - interpreter::Flags::PqOutputs;
         // TODO: The C++ implementation fails an assert (interpreter.cpp:1097) if `CleanStack` is
         //       set without `P2SH`.
         if flags.contains(interpreter::Flags::CleanStack) {

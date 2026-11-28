@@ -15,6 +15,8 @@ use bech32::{Bech32m, Checksum, Hrp, primitives::decode::CheckedHrpstring};
 use zcash_protocol::consensus::NetworkType;
 
 mod f4jumble;
+#[cfg(test)]
+mod pq_test_vectors;
 
 pub(crate) mod address;
 pub(crate) mod fvk;
@@ -26,10 +28,72 @@ pub use ivk::{Ivk, Uivk};
 
 const PADDING_LEN: usize = 16;
 
+/// Provisional typecode for a format-0 SLH-DSA-SHA2-128f transparent receiver.
+///
+/// Permanent typecodes are requested through the ZIP process, so an address issued under this
+/// code is not durable, and moving to the assigned code is a change to this constant alone.
+///
+/// The `0xFFFA..=0xFFFF` range reserved for experiments would be the natural place to park a
+/// provisional code, but it cannot hold a *known* one: the shared ZIP 316 test vectors use
+/// those values for their unknown-receiver cases, so claiming one turns those vectors into
+/// malformed PQ receivers. These are the next unassigned codes instead, which also keeps the
+/// receiver's typecode a single byte on the wire.
+pub const PQ_SHA2_128F_TYPECODE: u32 = 0x04;
+
+/// Provisional typecode for a format-0 SLH-DSA-SHA2-192s transparent receiver.
+///
+/// See [`PQ_SHA2_128F_TYPECODE`] for what "provisional" costs and why this is not in the
+/// experimental range.
+pub const PQ_SHA2_192S_TYPECODE: u32 = 0x05;
+
+/// The post-quantum signature scheme that a PQ transparent receiver names.
+///
+/// Each scheme has a typecode of its own, so a wallet that does not know one skips that
+/// receiver under ZIP 316's existing rule for unknown typecodes rather than needing a rule
+/// about scheme numbers. The receiver's data is the commitment from the output that pays it,
+/// and the scheme fixes that commitment's length.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PqScheme {
+    /// SLH-DSA-SHA2-128f, which signs fast enough for a constrained signing device.
+    Sha2_128f,
+    /// SLH-DSA-SHA2-192s, the recommended default where a general-purpose CPU signs.
+    Sha2_192s,
+}
+
+impl PqScheme {
+    /// The typecode a receiver for this scheme carries.
+    pub const fn typecode(self) -> u32 {
+        match self {
+            Self::Sha2_128f => PQ_SHA2_128F_TYPECODE,
+            Self::Sha2_192s => PQ_SHA2_192S_TYPECODE,
+        }
+    }
+
+    /// The scheme a typecode names, for the PQ typecodes alone.
+    pub const fn from_typecode(typecode: u32) -> Option<Self> {
+        match typecode {
+            PQ_SHA2_128F_TYPECODE => Some(Self::Sha2_128f),
+            PQ_SHA2_192S_TYPECODE => Some(Self::Sha2_192s),
+            _ => None,
+        }
+    }
+
+    /// The exact length of a receiver's commitment under this scheme.
+    ///
+    /// Both schemes defined so far belong to output format 0, whose commitment is a 32-byte
+    /// SHA-256 hash. A later format with a longer commitment arrives as further schemes here,
+    /// each with its own typecode and its own length.
+    pub const fn commitment_bytes(self) -> usize {
+        match self {
+            Self::Sha2_128f | Self::Sha2_192s => 32,
+        }
+    }
+}
+
 /// The known Receiver and Viewing Key types.
 ///
-/// The typecodes `0xFFFA..=0xFFFF` reserved for experiments are currently not
-/// distinguished from unknown values, and will be parsed as [`Typecode::Unknown`].
+/// The typecodes `0xFFFA..=0xFFFF` reserved for experiments are not distinguished from unknown
+/// values, and will be parsed as [`Typecode::Unknown`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Typecode {
     /// A transparent P2PKH address, FVK, or IVK encoding as specified in [ZIP 316](https://zips.z.cash/zip-0316).
@@ -42,6 +106,12 @@ pub enum Typecode {
     Sapling,
     /// An Orchard raw address, FVK, or IVK encoding as specified in [ZIP 316](https://zips.z.cash/zip-0316).
     Orchard,
+    /// A post-quantum transparent address: a commitment to the script that may spend it.
+    ///
+    /// This typecode cannot occur in a [`Ufvk`] or [`Uivk`], because a hash-based public key
+    /// cannot be derived without the secret that generates it: there is nothing a viewing key
+    /// could hold that would let it produce further addresses.
+    PqTransparent(PqScheme),
     /// An unknown or experimental typecode.
     Unknown(u32),
 }
@@ -69,6 +139,14 @@ impl Typecode {
             (Self::Sapling, _) => cmp::Ordering::Less,
             (_, Self::Sapling) => cmp::Ordering::Greater,
 
+            // A PQ receiver outranks legacy transparent, being strictly stronger
+            // authorization, and ranks below both shielded pools, being transparent. Between
+            // the PQ schemes the stronger one wins, reversing their declaration order; a
+            // well-formed address offers only one, so this is a tiebreak rather than guidance.
+            (Self::PqTransparent(a), Self::PqTransparent(b)) => b.cmp(a),
+            (Self::PqTransparent(_), _) => cmp::Ordering::Less,
+            (_, Self::PqTransparent(_)) => cmp::Ordering::Greater,
+
             (Self::P2sh, _) => cmp::Ordering::Less,
             (_, Self::P2sh) => cmp::Ordering::Greater,
 
@@ -86,6 +164,10 @@ impl TryFrom<u32> for Typecode {
     type Error = ParseError;
 
     fn try_from(typecode: u32) -> Result<Self, Self::Error> {
+        // Checked first: the unknown-typecode arm below would otherwise claim these codes.
+        if let Some(scheme) = PqScheme::from_typecode(typecode) {
+            return Ok(Typecode::PqTransparent(scheme));
+        }
         match typecode {
             0x00 => Ok(Typecode::P2pkh),
             0x01 => Ok(Typecode::P2sh),
@@ -104,6 +186,7 @@ impl From<Typecode> for u32 {
             Typecode::P2sh => 0x01,
             Typecode::Sapling => 0x02,
             Typecode::Orchard => 0x03,
+            Typecode::PqTransparent(scheme) => scheme.typecode(),
             Typecode::Unknown(typecode) => typecode,
         }
     }
@@ -118,9 +201,17 @@ impl TryFrom<Typecode> for usize {
 
 impl Typecode {
     fn is_transparent(&self) -> bool {
+        // A PQ receiver is transparent: it has the on-chain visibility of any transparent
+        // output, so an address offering nothing else is still a transparent-only address and
+        // is rejected as one. That is what makes `ParseError::OnlyTransparent` reachable for a
+        // PQ-only address, which has no Revision 0 encoding and uses a standalone form.
+        //
         // Unknown typecodes are treated as not transparent for the purpose of disallowing
         // only-transparent UAs, which can be represented with existing address encodings.
-        matches!(self, Typecode::P2pkh | Typecode::P2sh)
+        matches!(
+            self,
+            Typecode::P2pkh | Typecode::P2sh | Typecode::PqTransparent(_)
+        )
     }
 }
 
