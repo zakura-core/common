@@ -284,6 +284,10 @@ impl Envelope {
     }
 
     /// Reads a v7 transaction, including its `header` and `nVersionGroupId` fields.
+    ///
+    /// The maps are validated once they have been read. Memory use grows only with the
+    /// bytes actually read, but this reader imposes no size limit of its own, so callers
+    /// reading untrusted input should bound its length (for example, to the block size).
     pub fn read<R: Read>(mut reader: R) -> io::Result<Self> {
         if reader.read_u32_le()? != V7_HEADER || reader.read_u32_le()? != V7_VERSION_GROUP_ID {
             return Err(invalid(EnvelopeError::NotV7));
