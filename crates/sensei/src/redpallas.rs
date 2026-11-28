@@ -73,7 +73,7 @@ use udon::{
     curve::{Pallas, PallasAffine, PallasPoint, PallasProjective},
     exec::{ExecutionOptions, SerialExecutor},
     field::{Fp, Fq},
-    msm::{Bases, Input, ScalarStorage, Scratch},
+    msm::{Bases, Input, Requirements, ScalarStorage, Scratch},
 };
 
 mod sealed {
@@ -522,8 +522,7 @@ pub fn verify_batch(items: &[BatchItem], rng: &mut dyn RandomSource) -> Result<(
     }
     bases.extend([base(0).to_point(), base(1).to_point()]);
     scalars.extend(sums);
-    let input = Input::new(Bases::Points(&bases), &scalars);
-    if execute(input, terms)? {
+    if execute(&bases, &scalars)? {
         Ok(())
     } else {
         Err(Error::InvalidSignature)
@@ -533,21 +532,29 @@ pub fn verify_batch(items: &[BatchItem], rng: &mut dyn RandomSource) -> Result<(
 // Runs the batch equation's MSM. With worker support compiled in, batches with
 // enough terms run on the shared pool; smaller batches and primitives-only
 // builds stay on the calling thread.
-fn execute(input: Input<'_, Pallas>, terms: usize) -> Result<bool, Error> {
+fn execute(bases: &[PallasPoint], scalars: &[Fq]) -> Result<bool, Error> {
+    let input = Input::new(Bases::Points(bases), scalars);
     #[cfg(all(feature = "multicore", any(feature = "prover", feature = "verifier")))]
     {
-        // Below this size, distributing windows costs more than it saves.
+        // Below this size, distributing the terms costs more than it saves.
         const POOL_TERMS: usize = 16;
+        let terms = bases.len();
         if terms >= POOL_TERMS {
             let pool = crate::native::executor::PoolExecutor::get();
             let budget = pool.budget();
             if budget != udon::exec::TaskBudget::SERIAL {
                 let options = ExecutionOptions::default().with_task_budget(budget);
+                // Udon evaluates an equation this short on one thread, so it
+                // reaches the workers as one run of terms for each of them.
+                let runs = (terms / POOL_TERMS).min(budget.get());
+                if terms < crate::tuning::REDPALLAS_SERIAL_BELOW_TERMS && runs > 1 {
+                    return pool
+                        .run(|context| execute_runs(bases, scalars, runs, options, context));
+                }
                 return pool.run(move |context| execute_with(input, options, context));
             }
         }
     }
-    let _ = terms;
     execute_with(input, ExecutionOptions::default(), &SerialExecutor)
 }
 
@@ -559,25 +566,58 @@ fn execute_with(
     let sizes = input
         .requirements(options)
         .map_err(|_| Error::InvalidInput)?;
+    with_scratch(sizes, |scratch| input.execute(options, executor, scratch))
+        .map(|result| result.is_identity())
+        .map_err(|_| Error::InvalidInput)
+}
+
+// Evaluates the equation as `runs` contiguous sums, which Udon schedules
+// together over one scratch allocation, and adds them.
+#[cfg(all(feature = "multicore", any(feature = "prover", feature = "verifier")))]
+fn execute_runs(
+    bases: &[PallasPoint],
+    scalars: &[Fq],
+    runs: usize,
+    options: ExecutionOptions,
+    executor: &impl udon::exec::Executor,
+) -> Result<bool, Error> {
+    use udon::msm::execution::{BatchPlan, JobStorage, WorkerStorage};
+
+    let run = bases.len().div_ceil(runs);
+    let inputs: Vec<Input<'_, Pallas>> = bases
+        .chunks(run)
+        .zip(scalars.chunks(run))
+        .map(|(bases, scalars)| Input::new(Bases::Points(bases), scalars))
+        .collect();
+    let (jobs, workers) =
+        BatchPlan::<Pallas>::storage_len(inputs.len(), options).map_err(|_| Error::InvalidInput)?;
+    let mut jobs = vec![JobStorage::EMPTY; jobs];
+    let mut workers = vec![WorkerStorage::EMPTY; workers];
+    let plan = BatchPlan::new(&inputs, options, &mut jobs, &mut workers)
+        .map_err(|_| Error::InvalidInput)?;
+    let mut partials = vec![PallasProjective::IDENTITY; inputs.len()];
+    with_scratch(plan.requirements(), |scratch| {
+        plan.execute(&mut partials, executor, scratch);
+    });
+    let sum = partials
+        .iter()
+        .fold(PallasProjective::IDENTITY, |sum, partial| sum.add(partial));
+    Ok(sum.is_identity())
+}
+
+fn with_scratch<R>(sizes: Requirements, work: impl FnOnce(Scratch<'_, Pallas>) -> R) -> R {
     let mut records = vec![ScalarStorage::ZERO; sizes.scalars()];
     let mut digits = vec![0; sizes.digits()];
     let mut affine = vec![PallasAffine::GENERATOR; sizes.affine()];
     let mut projective = vec![PallasProjective::IDENTITY; sizes.projective()];
     let mut fields = vec![Fp::ZERO; sizes.field()];
     let mut indices = vec![0; sizes.indices()];
-    let result = input
-        .execute(
-            options,
-            executor,
-            Scratch::new(
-                &mut records,
-                &mut digits,
-                &mut affine,
-                &mut projective,
-                &mut fields,
-                &mut indices,
-            ),
-        )
-        .map_err(|_| Error::InvalidInput)?;
-    Ok(result.is_identity())
+    work(Scratch::new(
+        &mut records,
+        &mut digits,
+        &mut affine,
+        &mut projective,
+        &mut fields,
+        &mut indices,
+    ))
 }
