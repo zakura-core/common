@@ -2003,14 +2003,12 @@ mod tests {
         zip32::AccountId,
     };
 
-    // The Ironwood tests below reference `TxVersion`/`BranchId` directly; without the
-    // `transparent-inputs` feature these are not otherwise in scope.
     #[cfg(all(
         feature = "circuits",
         feature = "pczt",
         not(feature = "transparent-inputs")
     ))]
-    use {crate::transaction::TxVersion, zcash_protocol::consensus::BranchId};
+    use zcash_protocol::consensus::BranchId;
 
     #[test]
     #[cfg(feature = "circuits")]
